@@ -54,6 +54,71 @@ _model_cache = {
     "first_load_logged": False  # Track if we've logged the initial scan
 }
 
+def download_if_missing(repo_id: str, local_dir: str, allow_patterns: Optional[List[str]] = None):
+    """Download model or tokenizer if missing"""
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError:
+        logger.error("huggingface_hub not installed, cannot download models")
+        return False
+
+    # Always attempt download if this function is called, relying on snapshot_download to handle caching
+    logger.info(f"Downloading {repo_id} to {local_dir}...")
+    try:
+        snapshot_download(
+            repo_id=repo_id,
+            local_dir=local_dir,
+            allow_patterns=allow_patterns,
+            local_dir_use_symlinks=False  # Avoid symlinks for better compatibility
+        )
+        logger.info(f"Successfully downloaded {repo_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to download {repo_id}: {e}")
+        return False
+
+def check_and_download_essential_models(vibevoice_dir: str):
+    """Check for essential models and download if missing"""
+    # 1. Check/Download Tokenizer
+    tokenizer_dir = os.path.join(vibevoice_dir, "tokenizer")
+    tokenizer_repo = "Qwen/Qwen2.5-1.5B"
+    tokenizer_patterns = ["tokenizer_config.json", "vocab.json", "merges.txt", "tokenizer.json"]
+
+    # Check if tokenizer exists (basic check)
+    has_tokenizer = False
+    if os.path.exists(tokenizer_dir):
+        files = os.listdir(tokenizer_dir)
+        if all(f in files for f in ["tokenizer_config.json", "vocab.json", "merges.txt"]):
+            has_tokenizer = True
+
+    if not has_tokenizer:
+        logger.info("Tokenizer missing, attempting download...")
+        download_if_missing(tokenizer_repo, tokenizer_dir, tokenizer_patterns)
+
+    # 2. Check/Download Models
+    models_to_download = [
+        ("VibeVoice-1.5B", "microsoft/VibeVoice-1.5B"),
+        ("VibeVoice-Large", "aoi-ot/VibeVoice-Large"),
+        ("VibeVoice-Large-Q8", "FabioSarracino/VibeVoice-Large-Q8"),
+        ("VibeVoice-Large-Q4", "DevParker/VibeVoice7b-low-vram")
+    ]
+
+    downloaded_any = False
+    for folder_name, repo_id in models_to_download:
+        model_dir = os.path.join(vibevoice_dir, folder_name)
+        # Check if model exists before downloading
+        if not check_folder_has_model_files(model_dir):
+             logger.info(f"Model {folder_name} missing, attempting download from {repo_id}...")
+             if download_if_missing(repo_id, model_dir):
+                 downloaded_any = True
+        else:
+            logger.debug(f"Model {folder_name} already exists.")
+
+    if downloaded_any:
+        # Clear cache to ensure new models are picked up
+        _model_cache["models"] = None
+
+
 def get_available_models() -> List[Tuple[str, str]]:
     """Scan models/vibevoice/ directory and return available models
 
@@ -61,6 +126,29 @@ def get_available_models() -> List[Tuple[str, str]]:
         List of tuples (display_name, folder_path)
     """
     import time
+    import folder_paths
+
+    # Determine paths
+    models_dir = folder_paths.get_folder_paths("checkpoints")[0]
+    vibevoice_dir = os.path.join(os.path.dirname(models_dir), "vibevoice")
+
+    if not os.path.exists(vibevoice_dir):
+        os.makedirs(vibevoice_dir, exist_ok=True)
+        logger.info(f"Created vibevoice models directory: {vibevoice_dir}")
+        # Force cache clear
+        _model_cache["models"] = None
+
+    # Check and download essentials BEFORE returning cached results if empty or not fully populated?
+    # Actually, we should check download if models are missing, or always check?
+    # The user said "instalen en el primer uso, si ya existe no volver a descargar" (install on first use, if exists don't download again)
+    # This implies checking every time we scan models, effectively.
+    # To avoid repeated costly checks, we rely on check_folder_has_model_files being fast (just file existence check).
+
+    # We only run the download check once per session (first_load_logged is a good proxy for "first use")
+    # OR whenever the cache is invalid/empty?
+    # Let's stick to checking on first load or if no models found.
+    if not _model_cache["first_load_logged"] or (_model_cache["models"] is not None and not _model_cache["models"]):
+         check_and_download_essential_models(vibevoice_dir)
 
     # Check if we have a valid cache
     current_time = time.time()
@@ -70,17 +158,6 @@ def get_available_models() -> List[Tuple[str, str]]:
         return _model_cache["models"]
 
     try:
-        import folder_paths
-        models_dir = folder_paths.get_folder_paths("checkpoints")[0]
-        vibevoice_dir = os.path.join(os.path.dirname(models_dir), "vibevoice")
-
-        if not os.path.exists(vibevoice_dir):
-            os.makedirs(vibevoice_dir, exist_ok=True)
-            logger.info(f"Created vibevoice models directory: {vibevoice_dir}")
-            _model_cache["models"] = []
-            _model_cache["last_scan_time"] = current_time
-            return []
-
         # First, collect all valid model folders
         valid_folders = []
         logger.debug(f"Scanning vibevoice directory: {vibevoice_dir}")
@@ -112,8 +189,8 @@ def get_available_models() -> List[Tuple[str, str]]:
         # Only log on first scan to avoid spam
         if not _model_cache["first_load_logged"]:
             if not models:
-                logger.warning("No valid models found in vibevoice directory")
-                logger.info(f"Please download models to: {vibevoice_dir}")
+                logger.warning("No valid models found in vibevoice directory even after download attempt")
+                logger.info(f"Please ensure models are in: {vibevoice_dir}")
             else:
                 # Single summary message instead of individual logs
                 logger.info(f"Found {len(models)} VibeVoice model(s) available")
@@ -1153,7 +1230,7 @@ class BaseVibeVoiceNode:
                         "Qwen tokenizer not found. Please download it manually.\n"
                         "Download from: https://huggingface.co/Qwen/Qwen2.5-1.5B/tree/main\n"
                         "Required files: tokenizer_config.json, vocab.json, merges.txt, tokenizer.json\n"
-                        f"Place files in: {os.path.join(comfyui_models_dir, 'tokenizer')}/"
+                        f"Place tokenizer files in: {os.path.join(comfyui_models_dir, 'tokenizer')}/"
                     )
 
                 # Validate that all required tokenizer files exist
