@@ -93,6 +93,7 @@ if check_embedded_vibevoice() and ensure_dependencies():
         from .nodes.multi_speaker_node import VibeVoiceMultipleSpeakersNode
         from .nodes.free_memory_node import VibeVoiceFreeMemoryNode
         from .nodes.lora_node import VibeVoiceLoRANode
+        from .nodes.nodes_training import VibeVoice_Dataset_Preparator, VibeVoice_LoRA_Trainer
 
         # Single speaker node
         NODE_CLASS_MAPPINGS["VibeVoiceSingleSpeakerNode"] = VibeVoiceSingleSpeakerNode
@@ -110,6 +111,13 @@ if check_embedded_vibevoice() and ensure_dependencies():
         NODE_CLASS_MAPPINGS["VibeVoiceLoRANode"] = VibeVoiceLoRANode
         NODE_DISPLAY_NAME_MAPPINGS["VibeVoiceLoRANode"] = "VibeVoice LoRA"
         
+        # Training nodes
+        NODE_CLASS_MAPPINGS["VibeVoice_Dataset_Preparator"] = VibeVoice_Dataset_Preparator
+        NODE_DISPLAY_NAME_MAPPINGS["VibeVoice_Dataset_Preparator"] = "🎙️ VibeVoice Dataset Preparator"
+
+        NODE_CLASS_MAPPINGS["VibeVoice_LoRA_Trainer"] = VibeVoice_LoRA_Trainer
+        NODE_DISPLAY_NAME_MAPPINGS["VibeVoice_LoRA_Trainer"] = "🚀 VibeVoice LoRA Trainer"
+
         logger.info("VibeVoice nodes registered successfully")
         
     except Exception as e:
