@@ -247,6 +247,40 @@ class VibeVoice_LoRA_Trainer:
         print("[VibeVoice Patch] Patch applied successfully.")
         return True
 
+    def _patch_flash_attention_import(self, repo_dir):
+        """Patches modeling_vibevoice.py to fix FlashAttentionKwargs import error."""
+        target_file = os.path.join(repo_dir, "src", "vibevoice", "modular", "modeling_vibevoice.py")
+        if not os.path.exists(target_file):
+            return False
+
+        with open(target_file, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        # Check if already patched
+        if "except ImportError:" in content and "FlashAttentionKwargs = dict" in content:
+            return True
+
+        print("[VibeVoice Patch] Patching FlashAttentionKwargs import...")
+
+        search_line = "from transformers.modeling_flash_attention_utils import FlashAttentionKwargs"
+
+        replacement_block = (
+            "try:\n"
+            "    from transformers.modeling_flash_attention_utils import FlashAttentionKwargs\n"
+            "except ImportError:\n"
+            "    FlashAttentionKwargs = dict  # Fallback type alias"
+        )
+
+        if search_line in content:
+            content = content.replace(search_line, replacement_block)
+            with open(target_file, "w", encoding="utf-8") as f:
+                f.write(content)
+            print("[VibeVoice Patch] FlashAttentionKwargs patch applied successfully.")
+            return True
+        else:
+            print("[VibeVoice Patch] Warning: Could not find FlashAttentionKwargs import line to patch.")
+            return False
+
     def _setup_environment(self, repo_dir, venv_dir, transformers_version):
         """Sets up the training repository and virtual environment."""
 
@@ -261,6 +295,7 @@ class VibeVoice_LoRA_Trainer:
 
         # Patch script
         self._patch_training_script(repo_dir)
+        self._patch_flash_attention_import(repo_dir)
 
         # 2. Create Venv if missing
         if not os.path.exists(venv_dir):

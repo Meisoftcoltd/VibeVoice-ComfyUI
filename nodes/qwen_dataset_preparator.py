@@ -1,6 +1,7 @@
 import os
 import json
 import glob
+import re
 import torch
 import librosa
 import soundfile as sf
@@ -20,10 +21,8 @@ class Qwen2Audio_Dataset_Preparator:
     @classmethod
     def INPUT_TYPES(cls):
         default_prompt = (
-            "Transcribe the following Spanish audio exactly. "
-            "If you hear non-verbal sounds like laughing, sighing, taking a breath, or clearing the throat, "
-            "insert descriptive tags in brackets within the transcription "
-            "(e.g., [risa], [suspiro], [respira], [aclara la garganta])."
+            "You are a strict transcription API. Output ONLY the raw transcribed text and the emotion tags [risa], [suspiro]. "
+            "Do not include phrases like 'La grabación dice', 'El audio dice', or any quotation marks around the text."
         )
         return {"required": {
             "raw_audio_dir": ("STRING", {"default": "./raw_audios"}),
@@ -147,6 +146,10 @@ class Qwen2Audio_Dataset_Preparator:
                             # Clean up transcription
                             transcription = transcription.strip()
                             transcription = transcription.replace('\n', ' ').replace('|', '')
+
+                            # Strict cleaning: Remove conversational wrappers and quotes
+                            transcription = re.sub(r"^(?:La grabación dice|El audio dice)[:;]?\s*", "", transcription, flags=re.IGNORECASE)
+                            transcription = transcription.strip('"\'')
 
                             if transcription:
                                 # JSONL format: {"text": "...", "audio": "/absolute/path/to/chunk.wav"}

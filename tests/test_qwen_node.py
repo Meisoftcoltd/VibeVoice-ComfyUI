@@ -32,7 +32,7 @@ class TestQwenNode(unittest.TestCase):
 
         # Check defaults
         self.assertEqual(input_types["required"]["transcription_prompt"][1]["default"],
-                         "Transcribe the following Spanish audio exactly. If you hear non-verbal sounds like laughing, sighing, taking a breath, or clearing the throat, insert descriptive tags in brackets within the transcription (e.g., [risa], [suspiro], [respira], [aclara la garganta]).")
+                         "You are a strict transcription API. Output ONLY the raw transcribed text and the emotion tags [risa], [suspiro]. Do not include phrases like 'La grabación dice', 'El audio dice', or any quotation marks around the text.")
 
 if __name__ == '__main__':
     unittest.main()
