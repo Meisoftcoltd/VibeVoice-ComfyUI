@@ -9,6 +9,7 @@ import subprocess
 import threading
 import sys
 import shutil
+import uuid
 import numpy as np
 from transformers import pipeline
 import folder_paths
@@ -132,9 +133,34 @@ class VibeVoice_Dataset_Preparator:
         chunk_counter = 0
 
         for audio_path in audio_files:
+            temp_wav_path = None
             try:
-                # 1. Cargar audio
-                y, sr = librosa.load(audio_path, sr=None, mono=True)
+                # 1. Preemptive FFmpeg Normalization
+                # Generate unique temp filename to avoid collisions
+                temp_filename = f"temp_{uuid.uuid4().hex}.wav"
+                temp_wav_path = os.path.join(output_dataset_dir, temp_filename)
+
+                # FFmpeg command: convert to 24kHz mono WAV
+                # -y: overwrite
+                # -ac 1: mono
+                # -ar 24000: 24kHz sample rate
+                ffmpeg_cmd = [
+                    "ffmpeg", "-y",
+                    "-i", audio_path,
+                    "-ac", "1",
+                    "-ar", "24000",
+                    temp_wav_path
+                ]
+
+                # Run subprocess
+                result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+
+                if result.returncode != 0:
+                    print(f"[Warning] FFmpeg failed for {audio_path}. Stderr: {result.stderr}")
+                    continue
+
+                # 2. Cargar audio safely from normalized wav
+                y, sr = librosa.load(temp_wav_path, sr=24000, mono=True)
                 total_duration = len(y) / sr
 
                 chunks_to_process = []
@@ -198,6 +224,13 @@ class VibeVoice_Dataset_Preparator:
             except Exception as e:
                 print(f"[Warning] Error procesando {audio_path}: {e}. Saltando archivo...")
                 continue
+            finally:
+                # Cleanup temporary file
+                if temp_wav_path and os.path.exists(temp_wav_path):
+                    try:
+                        os.remove(temp_wav_path)
+                    except Exception as cleanup_error:
+                        print(f"[Warning] Failed to remove temp file {temp_wav_path}: {cleanup_error}")
 
         # 5. Guardar prompts.jsonl
         with open(prompts_path, 'w', encoding='utf-8') as f:
