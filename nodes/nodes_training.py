@@ -2,7 +2,6 @@ import os
 import json
 import glob
 import torch
-import torchaudio
 import librosa
 import soundfile as sf
 import subprocess
@@ -206,7 +205,12 @@ class VibeVoice_Dataset_Preparator:
                     # Remove None values
                     generate_kwargs = {k: v for k, v in generate_kwargs.items() if v is not None}
 
-                    transcription = asr_pipeline(chunk_filepath, generate_kwargs=generate_kwargs)["text"].strip()
+                    # Whisper natively expects 16kHz audio.
+                    # We create a 16kHz copy in RAM specifically for the pipeline to bypass torchaudio file loading.
+                    chunk_16k = librosa.resample(chunk_24k, orig_sr=TARGET_SR, target_sr=16000)
+
+                    # Pass the raw numpy array instead of the chunk_filepath string
+                    transcription = asr_pipeline(chunk_16k, generate_kwargs=generate_kwargs)["text"].strip()
 
                     # Limpiar saltos de línea
                     transcription = transcription.replace('\n', ' ').replace('|', '')
