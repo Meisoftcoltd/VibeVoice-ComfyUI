@@ -9,7 +9,9 @@ import subprocess
 import threading
 import sys
 import shutil
+import numpy as np
 from transformers import pipeline
+import folder_paths
 
 # Configure logging
 import logging
@@ -17,12 +19,13 @@ logger = logging.getLogger("VibeVoice")
 
 class VibeVoice_Dataset_Preparator:
     """
-    Prepara un dataset para VibeVoice generando un archivo prompts.jsonl.
-    Corta silencios, remuestrea a 24kHz, normaliza el audio y transcribe con Whisper base.
+    Prepara un dataset para VibeVoice usando Whisper con inyección de prompt para capturar paralingüística.
+    Utiliza una estrategia de corte inteligente para maximizar la longitud de los chunks (hasta 20s).
     """
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
+            "model": (["openai/whisper-large-v3-turbo", "openai/whisper-large-v3", "openai/whisper-medium", "openai/whisper-small", "openai/whisper-base", "openai/whisper-tiny"], {"default": "openai/whisper-large-v3-turbo"}),
             "raw_audio_dir": ("STRING", {"default": "./raw_audios"}),
             "output_dataset_dir": ("STRING", {"default": "./vibevoice_dataset"}),
             "language": (["es", "en", "auto"], {"default": "es"}),
@@ -33,25 +36,87 @@ class VibeVoice_Dataset_Preparator:
     FUNCTION = "prepare_dataset"
     CATEGORY = "VibeVoice/Training"
 
-    def prepare_dataset(self, raw_audio_dir, output_dataset_dir, language):
+    def _smart_slice(self, intervals, total_samples, sr, min_len_sec, max_len_sec):
+        """
+        Slices audio based on non-silent intervals, accumulating them into chunks <= max_len_sec.
+        Preserves silence within a chunk, but discards silence between chunks.
+        """
+        if len(intervals) == 0:
+            return []
+
+        chunks = []
+
+        # Current candidate chunk
+        current_start = intervals[0][0]
+        current_end = intervals[0][1]
+
+        for i in range(1, len(intervals)):
+            next_interval = intervals[i]
+            next_start = next_interval[0]
+            next_end = next_interval[1]
+
+            # Calculate duration if we were to merge the next interval
+            # This includes the silence between current_end and next_start
+            proposed_end = next_end
+            proposed_duration = (proposed_end - current_start) / sr
+
+            if proposed_duration <= max_len_sec:
+                # It fits! Extend the current chunk.
+                current_end = next_end
+            else:
+                # It doesn't fit. Finalize current.
+
+                # Check if current chunk is valid (length check handled downstream or logic here)
+                # If current chunk is > max_len_sec (e.g. first interval was huge), force split.
+                chunk_dur = (current_end - current_start) / sr
+                if chunk_dur > max_len_sec:
+                    num_splits = int(np.ceil(chunk_dur / max_len_sec))
+                    for j in range(num_splits):
+                        split_start = current_start + j * int(max_len_sec * sr)
+                        split_end = min(current_end, current_start + (j + 1) * int(max_len_sec * sr))
+                        if split_end > split_start:
+                            chunks.append([split_start, split_end])
+                else:
+                    chunks.append([current_start, current_end])
+
+                # Start a new chunk with the next interval
+                current_start = next_start
+                current_end = next_end
+
+        # Handle the final pending chunk
+        chunk_dur = (current_end - current_start) / sr
+        if chunk_dur > max_len_sec:
+            num_splits = int(np.ceil(chunk_dur / max_len_sec))
+            for j in range(num_splits):
+                split_start = current_start + j * int(max_len_sec * sr)
+                split_end = min(current_end, current_start + (j + 1) * int(max_len_sec * sr))
+                if split_end > split_start:
+                    chunks.append([split_start, split_end])
+        else:
+            chunks.append([current_start, current_end])
+
+        return chunks
+
+    def prepare_dataset(self, model, raw_audio_dir, output_dataset_dir, language):
         os.makedirs(output_dataset_dir, exist_ok=True)
         wavs_dir = os.path.join(output_dataset_dir, "wavs")
         os.makedirs(wavs_dir, exist_ok=True)
         prompts_path = os.path.join(output_dataset_dir, "prompts.jsonl")
 
-        # Configuraciones acústicas estrictas
+        # Configuraciones acústicas
         TARGET_SR = 24000
-        MIN_LEN_SEC = 3.0
-        MAX_LEN_SEC = 14.0
+        MIN_LEN_SEC = 2.0
+        MAX_LEN_SEC = 20.0
 
-        # Cargar Whisper estándar (HuggingFace)
+        # Cargar Whisper (Pipeline)
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"[VibeVoice] Cargando modelo Whisper en {device}...")
+        print(f"[VibeVoice] Cargando modelo Whisper ({model}) en {device} con float16...")
         try:
             asr_pipeline = pipeline(
                 "automatic-speech-recognition",
-                model="openai/whisper-base",
-                device=device
+                model=model,
+                device=device,
+                torch_dtype=torch.float16 if device == "cuda" else torch.float32
             )
         except Exception as e:
             print(f"[Error] Failed to load Whisper pipeline: {e}")
@@ -70,62 +135,82 @@ class VibeVoice_Dataset_Preparator:
             try:
                 # 1. Cargar audio
                 y, sr = librosa.load(audio_path, sr=None, mono=True)
+                total_duration = len(y) / sr
 
-                # 2. VAD (Detección de silencios y corte usando librosa effects por estabilidad)
-                # Separa el audio donde hay silencios menores a 30 decibelios
-                non_mute_intervals = librosa.effects.split(y, top_db=30)
+                chunks_to_process = []
 
-                for interval in non_mute_intervals:
-                    start_sample, end_sample = interval
-                    chunk = y[start_sample:end_sample]
+                if total_duration <= MAX_LEN_SEC:
+                     chunks_to_process.append((y, 0, len(y)))
+                else:
+                    # 2. Smart Slicing
+                    intervals = librosa.effects.split(y, top_db=40)
+                    sliced_intervals = self._smart_slice(intervals, len(y), sr, MIN_LEN_SEC, MAX_LEN_SEC)
+                    for start, end in sliced_intervals:
+                        chunks_to_process.append((y[start:end], start, end))
+
+                for chunk, start_sample, end_sample in chunks_to_process:
                     duration = len(chunk) / sr
 
-                    # 3. Filtro de longitud estricto
-                    if MIN_LEN_SEC <= duration <= MAX_LEN_SEC:
-                        # Remuestrear a 24kHz si es necesario
-                        if sr != TARGET_SR:
-                            chunk = librosa.resample(chunk, orig_sr=sr, target_sr=TARGET_SR)
+                    # 3. Filtro de longitud
+                    if duration < MIN_LEN_SEC:
+                        continue
 
-                        # Normalizar RMS a -20 dBFS
-                        rms = librosa.feature.rms(y=chunk)[0]
-                        target_rms = 10 ** (-20 / 20)
-                        mean_rms = rms.mean() + 1e-9
-                        chunk = chunk * (target_rms / mean_rms)
+                    # Remuestrear a 24kHz
+                    if sr != TARGET_SR:
+                        chunk_24k = librosa.resample(chunk, orig_sr=sr, target_sr=TARGET_SR)
+                    else:
+                        chunk_24k = chunk
 
-                        # Guardar chunk
-                        chunk_filename = f"chunk_{chunk_counter:05d}.wav"
-                        chunk_filepath = os.path.join(wavs_dir, chunk_filename)
-                        sf.write(chunk_filepath, chunk, TARGET_SR, subtype='PCM_16')
+                    # Normalizar RMS a -20 dBFS
+                    rms = librosa.feature.rms(y=chunk_24k)[0]
+                    target_rms = 10 ** (-20 / 20)
+                    mean_rms = rms.mean() + 1e-9
+                    chunk_24k = chunk_24k * (target_rms / mean_rms)
 
-                        # 4. Transcripción ASR
-                        generate_kwargs = {"language": language} if language != "auto" else {}
-                        transcription_result = asr_pipeline(chunk_filepath, generate_kwargs=generate_kwargs)
-                        transcription = transcription_result["text"].strip()
+                    # Guardar chunk
+                    chunk_filename = f"chunk_{chunk_counter:05d}.wav"
+                    chunk_filepath = os.path.join(wavs_dir, chunk_filename)
+                    sf.write(chunk_filepath, chunk_24k, TARGET_SR, subtype='PCM_16')
 
-                        # Limpiar saltos de línea y caracteres raros
-                        transcription = transcription.replace('\n', ' ').replace('|', '')
+                    # 4. Transcripción ASR con Prompt Injection
+                    generate_kwargs = {
+                        "language": language if language != "auto" else None,
+                        "prompt": "Uhm, ah, [risa], [suspiro], [tos], eh, mhm, bueno..."
+                    }
+                    # Remove None values
+                    generate_kwargs = {k: v for k, v in generate_kwargs.items() if v is not None}
 
-                        if transcription:
-                            # Formato JSONL: {"text": "...", "audio": "/absolute/path/to/chunk.wav"}
-                            entry = {
-                                "text": transcription,
-                                "audio": os.path.abspath(chunk_filepath)
-                            }
-                            jsonl_entries.append(entry)
-                            chunk_counter += 1
-                            print(f"Procesado: {chunk_filename} -> {transcription[:50]}...")
+                    transcription = asr_pipeline(chunk_filepath, generate_kwargs=generate_kwargs)["text"].strip()
+
+                    # Limpiar saltos de línea
+                    transcription = transcription.replace('\n', ' ').replace('|', '')
+
+                    if transcription:
+                        # Formato JSONL
+                        entry = {
+                            "text": transcription,
+                            "audio": os.path.abspath(chunk_filepath)
+                        }
+                        jsonl_entries.append(entry)
+                        chunk_counter += 1
+                        print(f"Procesado: {chunk_filename} -> {transcription[:50]}...")
 
             except Exception as e:
                 print(f"[Warning] Error procesando {audio_path}: {e}. Saltando archivo...")
                 continue
 
-        # 5. Empaquetado: Guardar prompts.jsonl
+        # 5. Guardar prompts.jsonl
         with open(prompts_path, 'w', encoding='utf-8') as f:
             for entry in jsonl_entries:
                 json.dump(entry, f, ensure_ascii=False)
                 f.write('\n')
 
         print(f"[VibeVoice] Dataset completado: {chunk_counter} fragmentos válidos generados en {output_dataset_dir}")
+
+        # Clean up pipeline
+        del asr_pipeline
+        torch.cuda.empty_cache()
+
         return (os.path.abspath(output_dataset_dir),)
 
 
@@ -366,8 +451,14 @@ class VibeVoice_LoRA_Trainer:
         if not python_cmd:
             return ("Error during setup",)
 
-        # Output directory
-        output_dir = os.path.join(dataset_path, output_lora_name)
+        # Output directory: ComfyUI models/vibevoice/loras/
+        try:
+            output_dir = os.path.join(folder_paths.models_dir, "vibevoice", "loras", output_lora_name)
+        except AttributeError:
+            # Fallback if folder_paths is not available (e.g. testing), though user said it is.
+            # Using a sensible default if not in ComfyUI environment
+            output_dir = os.path.join(os.getcwd(), "models", "vibevoice", "loras", output_lora_name)
+
         os.makedirs(output_dir, exist_ok=True)
 
         prompts_jsonl = os.path.join(dataset_path, "prompts.jsonl")
@@ -380,22 +471,22 @@ class VibeVoice_LoRA_Trainer:
         command = [
             python_cmd, "-m", "src.finetune_vibevoice_lora",
             "--model_name_or_path", model_path_to_use,
-            "--train_jsonl", prompts_jsonl, # Updated flag
+            "--train_jsonl", prompts_jsonl,
             "--output_dir", output_dir,
             "--per_device_train_batch_size", str(batch_size),
             "--gradient_accumulation_steps", str(gradient_accum_steps),
             "--num_train_epochs", str(epochs),
             "--learning_rate", str(learning_rate),
-            "--bf16", "True" if mixed_precision == "bf16" else "False", # Assuming script uses True/False string or bool
+            "--bf16", "True" if mixed_precision == "bf16" else "False",
             "--fp16", "True" if mixed_precision == "fp16" else "False",
             "--lora_r", str(lora_rank),
             "--lora_alpha", str(lora_alpha),
-            "--lora_target_modules", "q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj", # As requested
-            "--train_diffusion_head", "True", # As requested
-            "--ddpm_batch_mul", "4", # As requested
-            "--diffusion_loss_weight", "1.4", # As requested
-            "--ce_loss_weight", "0.04", # As requested
-            "--voice_prompt_drop_rate", "0.2", # As requested
+            "--lora_target_modules", "q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
+            "--train_diffusion_head", "True",
+            "--ddpm_batch_mul", "4",
+            "--diffusion_loss_weight", "1.4",
+            "--ce_loss_weight", "0.04",
+            "--voice_prompt_drop_rate", "0.2",
             "--logging_steps", "10",
             "--save_strategy", "epoch"
         ]
