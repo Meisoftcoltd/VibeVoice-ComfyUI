@@ -498,7 +498,10 @@ class TrainLossEarlyStoppingCallback(TrainerCallback):
             "--ce_loss_weight", "0.04",
             "--voice_prompt_drop_rate", "0.2",
             "--logging_steps", "10",
-            "--save_strategy", "epoch"
+            "--save_strategy", "steps",
+            "--save_steps", "200",
+            "--save_total_limit", "2",
+            "--do_train"
         ]
 
         print("[VibeVoice] Iniciando subproceso de entrenamiento...")
