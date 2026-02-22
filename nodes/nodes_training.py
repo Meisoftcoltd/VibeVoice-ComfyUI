@@ -511,6 +511,7 @@ class TrainLossEarlyStoppingCallback(TrainerCallback):
             "--save_strategy", "steps",
             "--save_steps", "200",
             "--save_total_limit", "2",
+            "--remove_unused_columns", "False",
             "--do_train"
         ]
 
