@@ -123,8 +123,15 @@ class VibeVoice_Dataset_Preparator:
             raise e
 
         audio_files = glob.glob(os.path.join(raw_audio_dir, "**/*.*"), recursive=True)
-        valid_extensions = ('.wav', '.mp3', '.flac', '.ogg')
-        audio_files = [f for f in audio_files if f.lower().endswith(valid_extensions)]
+        valid_extensions = ('.wav', '.mp3', '.flac', '.ogg', '.m4a', '.mp4')
+
+        # Absolute path of output to prevent recursive processing
+        out_dir_abs = os.path.abspath(output_dataset_dir)
+
+        audio_files = [
+            f for f in audio_files
+            if f.lower().endswith(valid_extensions) and not os.path.abspath(f).startswith(out_dir_abs)
+        ]
 
         print(f"[VibeVoice] Encontrados {len(audio_files)} archivos de audio. Iniciando procesamiento...")
 
@@ -195,11 +202,21 @@ class VibeVoice_Dataset_Preparator:
                     generate_kwargs = {k: v for k, v in generate_kwargs.items() if v is not None}
 
                     # Whisper natively expects 16kHz audio.
-                    # We create a 16kHz copy in RAM specifically for the pipeline to bypass torchaudio file loading.
                     chunk_16k = librosa.resample(chunk_24k, orig_sr=TARGET_SR, target_sr=16000)
 
-                    # Pass the raw numpy array instead of the chunk_filepath string
-                    transcription = asr_pipeline(chunk_16k, generate_kwargs=generate_kwargs)["text"].strip()
+                    # Monkey-patch to hide torchaudio from transformers
+                    import sys
+                    original_torchaudio = sys.modules.get('torchaudio')
+                    sys.modules['torchaudio'] = None
+
+                    try:
+                        transcription = asr_pipeline(chunk_16k, generate_kwargs=generate_kwargs)["text"].strip()
+                    finally:
+                        # Restore torchaudio to avoid breaking other ComfyUI nodes
+                        if original_torchaudio is not None:
+                            sys.modules['torchaudio'] = original_torchaudio
+                        else:
+                            del sys.modules['torchaudio']
 
                     # Limpiar saltos de línea
                     transcription = transcription.replace('\n', ' ').replace('|', '')
