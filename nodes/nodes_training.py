@@ -279,7 +279,7 @@ class VibeVoice_LoRA_Trainer:
                 "mixed_precision": (["bf16", "fp16", "no"], {"default": "bf16"}),
                 "lora_rank": ("INT", {"default": 32, "min": 4, "max": 128}),
                 "lora_alpha": ("INT", {"default": 64, "min": 8, "max": 256}),
-                "transformers_version": ("STRING", {"default": "4.44.2", "multiline": False}), # Providing flexibility
+                "transformers_version": ("STRING", {"default": "4.51.3", "multiline": False}), # Providing flexibility
             },
             "optional": {
                 "custom_model_path": ("STRING", {"default": "", "multiline": False}),
@@ -479,12 +479,19 @@ class TrainLossEarlyStoppingCallback(TrainerCallback):
              print(f"[Error] prompts.jsonl not found in {dataset_path}")
              return (output_dir,)
 
+        # Bust Hugging Face cache by creating a unique temporary copy of the dataset
+        import uuid
+        unique_id = uuid.uuid4().hex[:8]
+        run_prompts_jsonl = os.path.join(dataset_path, f"prompts_run_{unique_id}.jsonl")
+        shutil.copy(prompts_jsonl, run_prompts_jsonl)
+
         # Construct Command
-        # python -m src.finetune_vibevoice_lora ...
         command = [
             python_cmd, "-m", "src.finetune_vibevoice_lora",
             "--model_name_or_path", model_path_to_use,
-            "--train_jsonl", prompts_jsonl,
+            "--train_jsonl", run_prompts_jsonl,
+            "--text_column_name", "text",
+            "--audio_column_name", "audio",
             "--output_dir", output_dir,
             "--per_device_train_batch_size", str(batch_size),
             "--gradient_accumulation_steps", str(gradient_accum_steps),
@@ -510,27 +517,33 @@ class TrainLossEarlyStoppingCallback(TrainerCallback):
         print("[VibeVoice] Iniciando subproceso de entrenamiento...")
         print("Comando:", " ".join(command))
 
-        # Popen
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=repo_dir)
+        try:
+            # Popen
+            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=repo_dir)
 
-        # Read output
-        thread = threading.Thread(target=self._read_subprocess_output, args=(process,))
-        thread.start()
+            # Read output
+            thread = threading.Thread(target=self._read_subprocess_output, args=(process,))
+            thread.start()
 
-        # Instead of process.wait(), use a polling loop to catch ComfyUI interrupts instantly
-        while process.poll() is None:
-            if mm.processing_interrupted():
-                print("\n[VibeVoice] Interrupción manual detectada desde ComfyUI. Cancelando entrenamiento...\n")
-                process.terminate()
-                process.wait()
-                return ("Entrenamiento cancelado manualmente",)
-            time.sleep(1)
+            # Instead of process.wait(), use a polling loop to catch ComfyUI interrupts instantly
+            while process.poll() is None:
+                if mm.processing_interrupted():
+                    print("\n[VibeVoice] Interrupción manual detectada desde ComfyUI. Cancelando entrenamiento...\n")
+                    process.terminate()
+                    process.wait()
+                    return ("Entrenamiento cancelado manualmente",)
+                time.sleep(1)
 
-        thread.join()
+            thread.join()
 
-        if process.returncode == 0:
-            print(f"[VibeVoice] Entrenamiento finalizado con éxito. LoRA guardado en {output_dir}")
-        else:
-            print(f"[VibeVoice] Entrenamiento falló con código {process.returncode}.")
+            if process.returncode == 0:
+                print(f"[VibeVoice] Entrenamiento finalizado con éxito. LoRA guardado en {output_dir}")
+            else:
+                print(f"[VibeVoice] Entrenamiento falló con código {process.returncode}.")
+
+        finally:
+            # Cleanup the unique dataset copy to save disk space
+            if os.path.exists(run_prompts_jsonl):
+                os.remove(run_prompts_jsonl)
 
         return (os.path.abspath(output_dir),)
