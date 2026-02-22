@@ -98,6 +98,14 @@ class VibeVoice_Dataset_Preparator:
         return chunks
 
     def prepare_dataset(self, model, raw_audio_dir, output_dataset_dir, language):
+        import os, glob, json, traceback
+        import numpy as np
+        import librosa
+        import soundfile as sf
+        from pydub import AudioSegment
+        import torch
+        from transformers import WhisperProcessor, WhisperForConditionalGeneration
+
         os.makedirs(output_dataset_dir, exist_ok=True)
         wavs_dir = os.path.join(output_dataset_dir, "wavs")
         os.makedirs(wavs_dir, exist_ok=True)
@@ -108,62 +116,54 @@ class VibeVoice_Dataset_Preparator:
         MIN_LEN_SEC = 2.0
         MAX_LEN_SEC = 20.0
 
-        # Cargar Whisper (Pipeline)
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"[VibeVoice] Cargando modelo Whisper ({model}) en {device} con float16...")
+        torch_dtype = torch.float16 if device == "cuda" else torch.float32
+
+        print(f"[VibeVoice] Cargando modelo Whisper ({model}) puro (sin pipelines) en {device} con {torch_dtype}...")
         try:
-            asr_pipeline = pipeline(
-                "automatic-speech-recognition",
-                model=model,
-                device=device,
-                torch_dtype=torch.float16 if device == "cuda" else torch.float32
-            )
+            # CARGA DIRECTA SIN PIPELINES (Inmune a torchcodec)
+            processor = WhisperProcessor.from_pretrained(model)
+            whisper_model = WhisperForConditionalGeneration.from_pretrained(model, torch_dtype=torch_dtype).to(device)
         except Exception as e:
-            print(f"[Error] Failed to load Whisper pipeline: {e}")
+            print(f"[Error] Failed to load pure Whisper: {e}")
             raise e
 
         audio_files = glob.glob(os.path.join(raw_audio_dir, "**/*.*"), recursive=True)
         valid_extensions = ('.wav', '.mp3', '.flac', '.ogg', '.m4a', '.mp4')
-
-        # Absolute path of output to prevent recursive processing
+        
+        # PREVENIR BUCLE INFINITO
         out_dir_abs = os.path.abspath(output_dataset_dir)
-
         audio_files = [
-            f for f in audio_files
+            f for f in audio_files 
             if f.lower().endswith(valid_extensions) and not os.path.abspath(f).startswith(out_dir_abs)
         ]
 
-        print(f"[VibeVoice] Encontrados {len(audio_files)} archivos de audio. Iniciando procesamiento...")
+        print(f"[VibeVoice] Encontrados {len(audio_files)} archivos de audio seguros. Iniciando procesamiento...")
 
         jsonl_entries = []
         chunk_counter = 0
 
         for audio_path in audio_files:
             try:
-                # 1. Load Audio with Pydub (Direct FFmpeg backend, supports mp4, ogg, m4a, etc.)
+                # 1. Extracción con Pydub (soporta OGG y MP4)
                 try:
                     audio_segment = AudioSegment.from_file(audio_path)
                 except Exception as e:
-                    print(f"[Warning] Pydub/FFmpeg failed to load {audio_path}: {e}")
+                    print(f"[Warning] Pydub failed on {audio_path}: {e}")
                     continue
 
-                # Force mono, 24kHz, and strictly 16-bit width
+                # Forzar 16-bit, mono, 24kHz
                 audio_segment = audio_segment.set_channels(1).set_frame_rate(24000).set_sample_width(2)
-
-                # 2. Convert to Numpy Array (float32) for librosa compatibility
-                # Pydub uses int16 or int32 by default. We must normalize to float32 [-1.0, 1.0]
                 samples = np.array(audio_segment.get_array_of_samples())
                 y = samples.astype(np.float32) / 32768.0
-
                 sr = 24000
                 total_duration = len(y) / sr
 
+                # 2. Smart Slicing
                 chunks_to_process = []
-
                 if total_duration <= MAX_LEN_SEC:
                      chunks_to_process.append((y, 0, len(y)))
                 else:
-                    # 2. Smart Slicing
                     intervals = librosa.effects.split(y, top_db=40)
                     sliced_intervals = self._smart_slice(intervals, len(y), sr, MIN_LEN_SEC, MAX_LEN_SEC)
                     for start, end in sliced_intervals:
@@ -171,58 +171,57 @@ class VibeVoice_Dataset_Preparator:
 
                 for chunk, start_sample, end_sample in chunks_to_process:
                     duration = len(chunk) / sr
-
-                    # 3. Filtro de longitud
                     if duration < MIN_LEN_SEC:
                         continue
 
-                    # Remuestrear a 24kHz
-                    if sr != TARGET_SR:
-                        chunk_24k = librosa.resample(chunk, orig_sr=sr, target_sr=TARGET_SR)
-                    else:
-                        chunk_24k = chunk
-
-                    # Normalizar RMS a -20 dBFS
+                    # 3. Guardado del chunk
+                    chunk_24k = chunk
                     rms = librosa.feature.rms(y=chunk_24k)[0]
                     target_rms = 10 ** (-20 / 20)
                     mean_rms = rms.mean() + 1e-9
                     chunk_24k = chunk_24k * (target_rms / mean_rms)
 
-                    # Guardar chunk
                     chunk_filename = f"chunk_{chunk_counter:05d}.wav"
                     chunk_filepath = os.path.join(wavs_dir, chunk_filename)
                     sf.write(chunk_filepath, chunk_24k, TARGET_SR, subtype='PCM_16')
 
-                    # 4. Transcripción ASR con Prompt Injection
-                    generate_kwargs = {
-                        "language": language if language != "auto" else None,
-                        "prompt": "Uhm, ah, [risa], [suspiro], [tos], eh, mhm, bueno..."
-                    }
-                    # Remove None values
-                    generate_kwargs = {k: v for k, v in generate_kwargs.items() if v is not None}
-
-                    # Whisper natively expects 16kHz audio.
+                    # 4. Transcripción ASR directa (Nivel Dios)
                     chunk_16k = librosa.resample(chunk_24k, orig_sr=TARGET_SR, target_sr=16000)
 
-                    # Monkey-patch to hide torchaudio from transformers
-                    import sys
-                    original_torchaudio = sys.modules.get('torchaudio')
-                    sys.modules['torchaudio'] = None
+                    # Convertir el array a espectrograma directamente (sin usar torchaudio)
+                    input_features = processor(
+                        chunk_16k, sampling_rate=16000, return_tensors="pt"
+                    ).input_features.to(device, dtype=torch_dtype)
 
+                    # Inyección de Prompt para capturar risas y suspiros
+                    prompt_text = "Uhm, ah, [risa], [suspiro], [tos], eh, mhm, bueno..."
+                    
+                    # Preparamos las instrucciones exactas
+                    gen_kwargs = {
+                        "language": language if language != "auto" else "es", # Forzamos español si no es auto
+                        "task": "transcribe"
+                    }
+                    
                     try:
-                        transcription = asr_pipeline(chunk_16k, generate_kwargs=generate_kwargs)["text"].strip()
-                    finally:
-                        # Restore torchaudio to avoid breaking other ComfyUI nodes
-                        if original_torchaudio is not None:
-                            sys.modules['torchaudio'] = original_torchaudio
-                        else:
-                            del sys.modules['torchaudio']
+                        # Generación matemática pura
+                        prompt_ids = processor.get_prompt_ids(prompt_text, return_tensors="pt").to(device)
+                        predicted_ids = whisper_model.generate(
+                            input_features, 
+                            prompt_ids=prompt_ids, 
+                            **gen_kwargs
+                        )
+                    except AttributeError:
+                        # Fallback si get_prompt_ids no está soportado en esta versión de transformers
+                        predicted_ids = whisper_model.generate(
+                            input_features, 
+                            **gen_kwargs
+                        )
 
-                    # Limpiar saltos de línea
+                    # Decodificamos los tokens a texto legible
+                    transcription = processor.batch_decode(predicted_ids, skip_special_tokens=True)[0].strip()
                     transcription = transcription.replace('\n', ' ').replace('|', '')
 
                     if transcription:
-                        # Formato JSONL
                         entry = {
                             "text": transcription,
                             "audio": os.path.abspath(chunk_filepath)
@@ -232,10 +231,10 @@ class VibeVoice_Dataset_Preparator:
                         print(f"Procesado: {chunk_filename} -> {transcription[:50]}...")
 
             except Exception as e:
-                print(f"[Warning] Error procesando {audio_path}: {e}. Saltando archivo...")
+                print(f"[Warning] Error procesando archivo completo {audio_path}: {e}")
+                traceback.print_exc()
                 continue
 
-        # 5. Guardar prompts.jsonl
         with open(prompts_path, 'w', encoding='utf-8') as f:
             for entry in jsonl_entries:
                 json.dump(entry, f, ensure_ascii=False)
@@ -243,13 +242,13 @@ class VibeVoice_Dataset_Preparator:
 
         print(f"[VibeVoice] Dataset completado: {chunk_counter} fragmentos válidos generados en {output_dataset_dir}")
 
-        # Clean up pipeline
-        del asr_pipeline
+        del whisper_model
+        del processor
         torch.cuda.empty_cache()
 
         return (os.path.abspath(output_dataset_dir),)
-
-
+        
+        
 class VibeVoice_LoRA_Trainer:
     """
     Ejecuta el entrenamiento del modelo usando un entorno virtual aislado para evitar conflictos de dependencias.
