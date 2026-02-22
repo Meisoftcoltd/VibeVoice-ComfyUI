@@ -224,8 +224,8 @@ class VibeVoice_Dataset_Preparator:
                     transcription = transcription.replace('\n', ' ').replace('|', '')
 
                     if transcription:
-                        # VibeVoice strictly requires speaker tags to parse the dataset
-                        formatted_text = f"Speaker 0: {transcription}"
+                        # VibeVoice's parser is hyper-strict. Force exact block formatting.
+                        formatted_text = f"Speaker 0: {transcription}\n"
 
                         entry = {
                             "text": formatted_text,
