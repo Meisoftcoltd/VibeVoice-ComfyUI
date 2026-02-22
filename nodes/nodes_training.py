@@ -379,6 +379,35 @@ class TrainLossEarlyStoppingCallback(TrainerCallback):
             print("[VibeVoice Patch] Warning: Could not find FlashAttentionKwargs import line to patch.")
             return False
 
+    def _patch_trainer_inputs(self, repo_dir):
+        import re
+        target_file = os.path.join(repo_dir, "src", "finetune_vibevoice_lora.py")
+        if not os.path.exists(target_file):
+            return False
+
+        with open(target_file, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        if "inputs_copy =" in content:
+            return True  # Already patched
+
+        # Intercept the model(**inputs) call to strip kwargs that crash Qwen2
+        pattern = r"outputs\s*=\s*model\(\s*\*\*inputs\s*\)"
+
+        if re.search(pattern, content):
+            replacement = (
+                "inputs_copy = {k: v for k, v in inputs.items() if k not in ['labels', 'text', 'audio']}\n"
+                "        outputs = model(**inputs_copy)"
+            )
+            content = re.sub(pattern, replacement, content)
+
+            with open(target_file, "w", encoding="utf-8") as f:
+                f.write(content)
+            print("[VibeVoice Patch] Successfully sanitized model inputs to prevent Qwen2 kwargs crash.")
+            return True
+
+        return False
+
     def _setup_environment(self, repo_dir, venv_dir, transformers_version):
         """Sets up the training repository and virtual environment."""
 
@@ -394,6 +423,7 @@ class TrainLossEarlyStoppingCallback(TrainerCallback):
         # Patch script
         self._patch_flash_attention_import(repo_dir)
         self._patch_early_stopping(repo_dir)
+        self._patch_trainer_inputs(repo_dir)  # <--- Add this new call
 
         # 2. Create Venv if missing
         if not os.path.exists(venv_dir):
