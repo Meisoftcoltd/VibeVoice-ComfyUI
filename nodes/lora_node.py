@@ -33,13 +33,21 @@ def get_available_loras() -> List[str]:
             for item in os.listdir(loras_dir):
                 item_path = os.path.join(loras_dir, item)
                 if os.path.isdir(item_path):
-                    # Check if it contains LoRA files
-                    adapter_config = os.path.join(item_path, "adapter_config.json")
-                    adapter_model_st = os.path.join(item_path, "adapter_model.safetensors")
-                    adapter_model_bin = os.path.join(item_path, "adapter_model.bin")
+                    # Check if it contains LoRA files directly
+                    has_direct = (
+                        os.path.exists(os.path.join(item_path, "adapter_config.json")) or
+                        os.path.exists(os.path.join(item_path, "adapter_model.safetensors")) or
+                        os.path.exists(os.path.join(item_path, "adapter_model.bin"))
+                    )
 
-                    # Consider it a valid LoRA if it has config or model files
-                    if os.path.exists(adapter_config) or os.path.exists(adapter_model_st) or os.path.exists(adapter_model_bin):
+                    # Check if it contains LoRA files in a 'lora' subfolder (from auto-trainer)
+                    has_subfolder = (
+                        os.path.exists(os.path.join(item_path, "lora", "adapter_config.json")) or
+                        os.path.exists(os.path.join(item_path, "lora", "adapter_model.safetensors")) or
+                        os.path.exists(os.path.join(item_path, "lora", "adapter_model.bin"))
+                    )
+
+                    if has_direct or has_subfolder:
                         lora_folders.append(item)
 
         # Only log on first scan to avoid spam
@@ -143,7 +151,15 @@ class VibeVoiceLoRANode:
                 logger.error(f"LoRA path is not a directory: {lora_path}")
                 raise Exception(f"LoRA path must be a directory: {lora_name}")
 
-            # Check for required files
+            # Smart Subfolder Detection:
+            # If the config is not in the root, but inside a "lora" subdirectory, adjust the path
+            if not os.path.exists(os.path.join(lora_path, "adapter_config.json")):
+                sub_path = os.path.join(lora_path, "lora")
+                if os.path.exists(os.path.join(sub_path, "adapter_config.json")):
+                    logger.info(f"Auto-detected nested LoRA files in {sub_path}")
+                    lora_path = sub_path
+
+            # Check for required files (using the potentially adjusted lora_path)
             adapter_config = os.path.join(lora_path, "adapter_config.json")
             adapter_model_st = os.path.join(lora_path, "adapter_model.safetensors")
             adapter_model_bin = os.path.join(lora_path, "adapter_model.bin")

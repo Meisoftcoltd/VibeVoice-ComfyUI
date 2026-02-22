@@ -279,6 +279,9 @@ class VibeVoice_LoRA_Trainer:
                 "mixed_precision": (["bf16", "fp16", "no"], {"default": "bf16"}),
                 "lora_rank": ("INT", {"default": 32, "min": 4, "max": 128}),
                 "lora_alpha": ("INT", {"default": 64, "min": 8, "max": 256}),
+                "early_stopping_patience": ("INT", {"default": 25, "min": 1, "max": 100, "tooltip": "Steps without improvement before stopping."}),
+                "early_stopping_threshold": ("FLOAT", {"default": 0.002, "min": 0.0001, "max": 0.1, "step": 0.001}),
+                "save_total_limit": ("INT", {"default": 3, "min": 1, "max": 10, "tooltip": "Maximum number of BEST models to keep. Worse ones will be deleted."}),
                 "transformers_version": ("STRING", {"default": "4.51.3", "multiline": False}), # Providing flexibility
             },
             "optional": {
@@ -291,58 +294,129 @@ class VibeVoice_LoRA_Trainer:
     FUNCTION = "train_lora"
     CATEGORY = "VibeVoice/Training"
 
-    def _read_subprocess_output(self, process):
-        """Lee la salida del subproceso asíncronamente para la consola de ComfyUI."""
+    def _read_subprocess_output(self, process, output_log):
+        """Lee la salida del subproceso asíncronamente y la guarda para análisis."""
         for line in iter(process.stdout.readline, b''):
-            print(f"[VibeVoice Train] {line.decode('utf-8', errors='replace').rstrip()}")
+            decoded_line = line.decode('utf-8', errors='replace').rstrip()
+            print(f"[VibeVoice Train] {decoded_line}")
+            output_log.append(decoded_line)
         process.stdout.close()
 
-    def _patch_early_stopping(self, repo_dir):
+    def _patch_early_stopping(self, repo_dir, patience, threshold, save_total_limit):
         target_file = os.path.join(repo_dir, "src", "finetune_vibevoice_lora.py")
         if not os.path.exists(target_file):
             return False
 
+        # 1. Restore the file to its original state from git to wipe any broken regex patches
+        import subprocess
+        try:
+            subprocess.check_call(["git", "checkout", "--", "src/finetune_vibevoice_lora.py"], cwd=repo_dir)
+        except Exception as e:
+            print(f"[VibeVoice Patch] Warning: Could not run git checkout: {e}")
+
+        # 2. Read the clean file
         with open(target_file, "r", encoding="utf-8") as f:
             content = f.read()
 
-        if "TrainLossEarlyStoppingCallback" in content:
-            return True
+        import re
 
-        print("[VibeVoice Patch] Injecting custom Early Stopping autopilot...")
-
-        callback_code = """
+        # Safely formatted callback code with NO nested newline escapes
+        callback_code = f"""
+# --- VIBEVOICE CUSTOM CALLBACK START ---
+import os
+import shutil
 from transformers import TrainerCallback
-class TrainLossEarlyStoppingCallback(TrainerCallback):
-    def __init__(self, patience=5, threshold=0.005):
+
+class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
+    def __init__(self, patience={patience}, threshold={threshold}, keep_best_n={save_total_limit}):
         self.patience = patience
         self.threshold = threshold
-        self.best_loss = float('inf')
+        self.keep_best_n = keep_best_n
+        self.best_diff_loss = float('inf')
+        self.best_ce_loss = float('inf')
         self.counter = 0
+        self.best_checkpoints = []
+        self.last_loss = float('inf')
 
     def on_log(self, args, state, control, logs=None, **kwargs):
-        if logs and "loss" in logs:
-            current_loss = logs["loss"]
-            if current_loss < self.best_loss - self.threshold:
-                self.best_loss = current_loss
-                self.counter = 0
-            else:
-                self.counter += 1
-                if self.counter >= self.patience:
-                    print(f"\\n[VibeVoice] AUTO-STOP TRIGGERED: Loss hasn't improved by {self.threshold} for {self.patience} logging steps.\\n")
-                    control.should_training_stop = True
-"""
-        # Insert callback code before main()
-        if "def main():" in content:
-            content = content.replace("def main():", callback_code + "\ndef main():")
+        if logs:
+            diff_loss = logs.get("train/diffusion_loss", None)
+            ce_loss = logs.get("train/ce_loss", None)
+            total_loss = logs.get("loss", None)
 
-        # Inject callback into Trainer instantiation
-        trainer_init = "trainer = Trainer("
-        trainer_replacement = "trainer = Trainer(\n        callbacks=[TrainLossEarlyStoppingCallback(patience=5)],"
-        if trainer_init in content:
+            if diff_loss is not None and ce_loss is not None:
+                self.last_loss = total_loss if total_loss is not None else (diff_loss + ce_loss)
+
+                diff_improved = diff_loss < (self.best_diff_loss - self.threshold)
+                ce_improved = ce_loss < (self.best_ce_loss - self.threshold)
+
+                if diff_improved or ce_improved:
+                    if diff_improved: self.best_diff_loss = diff_loss
+                    if ce_improved: self.best_ce_loss = ce_loss
+                    self.counter = 0
+                else:
+                    self.counter += 1
+                    if self.counter >= self.patience:
+                        print("")
+                        print(f"[VibeVoice Smart Stop] AUTO-STOP: Degradation in BOTH acoustic and text logic for {{self.patience}} steps.")
+                        print("")
+                        control.should_training_stop = True
+
+    def on_save(self, args, state, control, **kwargs):
+        ckpt_dir = os.path.join(args.output_dir, f"checkpoint-{{state.global_step}}")
+        if os.path.exists(ckpt_dir):
+            self.best_checkpoints.append((self.last_loss, ckpt_dir))
+            self.best_checkpoints.sort(key=lambda x: x[0])
+
+            while len(self.best_checkpoints) > self.keep_best_n:
+                worst_loss, worst_ckpt = self.best_checkpoints.pop(-1)
+                if os.path.exists(worst_ckpt):
+                    try:
+                        shutil.rmtree(worst_ckpt)
+                        print(f"[VibeVoice Smart Saver] Deleted worst checkpoint: {{worst_ckpt}} (Loss: {{worst_loss:.4f}})")
+                    except Exception:
+                        pass
+
+    def on_train_end(self, args, state, control, **kwargs):
+        if not self.best_checkpoints:
+            return
+
+        best_loss, best_ckpt = self.best_checkpoints[0]
+        best_lora_dir = os.path.join(best_ckpt, "lora")
+        final_lora_dir = os.path.join(args.output_dir, "lora")
+
+        print("")
+        print(f"[VibeVoice Smart Saver] Training complete. Restoring BEST model from {{os.path.basename(best_ckpt)}} (Loss: {{best_loss:.4f}}) as the final output...")
+
+        if os.path.exists(best_lora_dir):
+            try:
+                if os.path.exists(final_lora_dir):
+                    shutil.rmtree(final_lora_dir)
+                shutil.copytree(best_lora_dir, final_lora_dir)
+                print("[VibeVoice Smart Saver] Best model successfully set as the final output in the main lora folder.")
+                print("")
+            except Exception as e:
+                print(f"[VibeVoice Smart Saver] Could not copy best model: {{e}}")
+# --- VIBEVOICE CUSTOM CALLBACK END ---
+"""
+
+        # 3. Inject the code safely right before def main (using Regex to catch type hints)
+        content = re.sub(r"def main\s*\([^)]*\)\s*(->\s*None)?\s*:", callback_code + r"\n\g<0>", content, count=1)
+
+        # 4. Safely update Trainer instantiation
+        callback_string = f"callbacks=[SmartEarlyStoppingAndSaveCallback(patience={patience}, threshold={threshold}, keep_best_n={save_total_limit})]"
+
+        if "callbacks=[" in content:
+            content = re.sub(r"callbacks=\[.*?\]", callback_string, content, flags=re.DOTALL)
+        else:
+            trainer_init = "trainer = Trainer("
+            trainer_replacement = f"trainer = Trainer(\n        {callback_string},"
             content = content.replace(trainer_init, trainer_replacement)
 
         with open(target_file, "w", encoding="utf-8") as f:
             f.write(content)
+
+        print("[VibeVoice Patch] Successfully applied Smart Checkpointing patch.")
         return True
 
     def _patch_flash_attention_import(self, repo_dir):
@@ -379,39 +453,26 @@ class TrainLossEarlyStoppingCallback(TrainerCallback):
             print("[VibeVoice Patch] Warning: Could not find FlashAttentionKwargs import line to patch.")
             return False
 
-    def _patch_modeling_kwargs(self, repo_dir):
-        target_file = os.path.join(repo_dir, "src", "vibevoice", "modular", "modeling_vibevoice.py")
+    def _patch_peft_task_type(self, repo_dir):
+        target_file = os.path.join(repo_dir, "src", "finetune_vibevoice_lora.py")
         if not os.path.exists(target_file):
             return False
 
         with open(target_file, "r", encoding="utf-8") as f:
             content = f.read()
 
-        # Check if already patched
-        if "kwargs.pop('labels', None)" in content:
-            return True
-
-        # Intercept the kwargs right before they are passed to the language model
-        search_str = "outputs = self.language_model("
-        replacement = (
-            "kwargs.pop('labels', None)\n"
-            "        kwargs.pop('text', None)\n"
-            "        kwargs.pop('audio', None)\n"
-            "        kwargs.pop('voice_prompts', None)\n"
-            "        outputs = self.language_model("
-        )
+        search_str = "task_type=TaskType.CAUSAL_LM,"
+        replacement = "task_type=TaskType.FEATURE_EXTRACTION,"
 
         if search_str in content:
             content = content.replace(search_str, replacement)
             with open(target_file, "w", encoding="utf-8") as f:
                 f.write(content)
-            print("[VibeVoice Patch] Successfully patched modeling_vibevoice.py to prevent kwargs crash.")
+            print("[VibeVoice Patch] Successfully patched PEFT TaskType to prevent labels kwarg injection.")
             return True
-        else:
-            print("[VibeVoice Patch] Warning: Could not find self.language_model in modeling_vibevoice.py")
-            return False
+        return False
 
-    def _setup_environment(self, repo_dir, venv_dir, transformers_version):
+    def _setup_environment(self, repo_dir, venv_dir, transformers_version, patience, threshold, save_total_limit):
         """Sets up the training repository and virtual environment."""
 
         # 1. Clone Repo if missing
@@ -425,8 +486,8 @@ class TrainLossEarlyStoppingCallback(TrainerCallback):
 
         # Patch script
         self._patch_flash_attention_import(repo_dir)
-        self._patch_early_stopping(repo_dir)
-        self._patch_modeling_kwargs(repo_dir)  # <--- Updated call
+        self._patch_early_stopping(repo_dir, patience, threshold, save_total_limit)
+        self._patch_peft_task_type(repo_dir)  # <--- New PEFT patch
 
         # 2. Create Venv if missing
         if not os.path.exists(venv_dir):
@@ -478,7 +539,8 @@ class TrainLossEarlyStoppingCallback(TrainerCallback):
 
     def train_lora(self, dataset_path, base_model_path, output_lora_name, batch_size,
                    gradient_accum_steps, epochs, learning_rate, mixed_precision,
-                   lora_rank, lora_alpha, transformers_version, custom_model_path=""):
+                   lora_rank, lora_alpha, early_stopping_patience, early_stopping_threshold,
+                   save_total_limit, transformers_version, custom_model_path=""):
 
         # Resolve model path
         model_path_to_use = base_model_path
@@ -493,7 +555,7 @@ class TrainLossEarlyStoppingCallback(TrainerCallback):
         venv_dir = os.path.join(current_dir, "vibevoice_venv")
 
         # Setup Environment
-        python_cmd = self._setup_environment(repo_dir, venv_dir, transformers_version)
+        python_cmd = self._setup_environment(repo_dir, venv_dir, transformers_version, early_stopping_patience, early_stopping_threshold, save_total_limit)
         if not python_cmd:
             return ("Error during setup",)
 
@@ -518,66 +580,94 @@ class TrainLossEarlyStoppingCallback(TrainerCallback):
         run_prompts_jsonl = os.path.join(dataset_path, f"prompts_run_{unique_id}.jsonl")
         shutil.copy(prompts_jsonl, run_prompts_jsonl)
 
-        # Construct Command
-        command = [
-            python_cmd, "-m", "src.finetune_vibevoice_lora",
-            "--model_name_or_path", model_path_to_use,
-            "--train_jsonl", run_prompts_jsonl,
-            "--text_column_name", "text",
-            "--audio_column_name", "audio",
-            "--output_dir", output_dir,
-            "--per_device_train_batch_size", str(batch_size),
-            "--gradient_accumulation_steps", str(gradient_accum_steps),
-            "--num_train_epochs", str(epochs),
-            "--learning_rate", str(learning_rate),
-            "--bf16", "True" if mixed_precision == "bf16" else "False",
-            "--fp16", "True" if mixed_precision == "fp16" else "False",
-            "--lora_r", str(lora_rank),
-            "--lora_alpha", str(lora_alpha),
-            "--lora_target_modules", "q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
-            "--train_diffusion_head", "True",
-            "--ddpm_batch_mul", "4",
-            "--diffusion_loss_weight", "1.4",
-            "--ce_loss_weight", "0.04",
-            "--voice_prompt_drop_rate", "0.2",
-            "--logging_steps", "10",
-            "--save_strategy", "steps",
-            "--save_steps", "200",
-            "--save_total_limit", "2",
-            "--remove_unused_columns", "False",
-            "--do_train"
-        ]
-
-        print("[VibeVoice] Iniciando subproceso de entrenamiento...")
-        print("Comando:", " ".join(command))
+        # Auto-Retry Loop for OOM Protection
+        current_batch_size = batch_size
+        current_grad_accum = gradient_accum_steps
+        max_retries = 5
+        training_success = False
 
         try:
-            # Popen
-            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=repo_dir)
+            for attempt in range(max_retries):
+                # Construct Command dynamically with current batch/accum
+                command = [
+                    python_cmd, "-m", "src.finetune_vibevoice_lora",
+                    "--model_name_or_path", model_path_to_use,
+                    "--train_jsonl", run_prompts_jsonl,
+                    "--text_column_name", "text",
+                    "--audio_column_name", "audio",
+                    "--output_dir", output_dir,
+                    "--per_device_train_batch_size", str(current_batch_size),
+                    "--gradient_accumulation_steps", str(current_grad_accum),
+                    "--num_train_epochs", str(epochs),
+                    "--learning_rate", str(learning_rate),
+                    "--bf16", "True" if mixed_precision == "bf16" else "False",
+                    "--fp16", "True" if mixed_precision == "fp16" else "False",
+                    "--lora_r", str(lora_rank),
+                    "--lora_alpha", str(lora_alpha),
+                    "--lora_target_modules", "q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
+                    "--train_diffusion_head", "True",
+                    "--ddpm_batch_mul", "4",
+                    "--diffusion_loss_weight", "1.4",
+                    "--ce_loss_weight", "0.04",
+                    "--voice_prompt_drop_rate", "0.2",
+                    "--logging_steps", "10",
+                    "--save_strategy", "steps",
+                    "--save_steps", "200",
+                    "--save_total_limit", "100",  # Set to 100 so HF doesn't delete them. Our callback will do it.
+                    "--remove_unused_columns", "False",
+                    "--do_train"
+                ]
 
-            # Read output
-            thread = threading.Thread(target=self._read_subprocess_output, args=(process,))
-            thread.start()
+                print(f"\n[VibeVoice] Iniciando entrenamiento (Intento {attempt+1}/{max_retries}) | Batch: {current_batch_size} | GradAccum: {current_grad_accum}")
 
-            # Instead of process.wait(), use a polling loop to catch ComfyUI interrupts instantly
-            while process.poll() is None:
-                if mm.processing_interrupted():
-                    print("\n[VibeVoice] Interrupción manual detectada desde ComfyUI. Cancelando entrenamiento...\n")
-                    process.terminate()
-                    process.wait()
-                    return ("Entrenamiento cancelado manualmente",)
-                time.sleep(1)
+                output_log = []
+                process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=repo_dir)
 
-            thread.join()
+                thread = threading.Thread(target=self._read_subprocess_output, args=(process, output_log))
+                thread.start()
 
-            if process.returncode == 0:
-                print(f"[VibeVoice] Entrenamiento finalizado con éxito. LoRA guardado en {output_dir}")
-            else:
-                print(f"[VibeVoice] Entrenamiento falló con código {process.returncode}.")
+                while process.poll() is None:
+                    if mm.processing_interrupted():
+                        print("\n[VibeVoice] Interrupción manual detectada desde ComfyUI. Cancelando entrenamiento...\n")
+                        process.terminate()
+                        process.wait()
+                        return ("Entrenamiento cancelado manualmente",)
+                    time.sleep(1)
+
+                thread.join()
+
+                if process.returncode == 0:
+                    print(f"[VibeVoice] Entrenamiento finalizado con éxito. LoRA guardado en {output_dir}")
+                    training_success = True
+                    break # Success, exit retry loop
+                else:
+                    full_log = "\n".join(output_log)
+                    if "OutOfMemoryError" in full_log or "out of memory" in full_log.lower():
+                        if current_batch_size > 1:
+                            print(f"\n[VibeVoice OOM Protector] ⚠️ Out of Memory detectado! Reduciendo Batch Size...")
+
+                            new_batch = max(1, current_batch_size // 2)
+                            # Maintain effective batch size (roughly) by increasing grad accum
+                            factor = current_batch_size // new_batch
+                            current_grad_accum = current_grad_accum * factor
+                            current_batch_size = new_batch
+
+                            print(f"[VibeVoice OOM Protector] Reiniciando automáticamente con Batch Size: {current_batch_size} y Grad Accum: {current_grad_accum}...\n")
+                            torch.cuda.empty_cache()
+                            continue # Retry the loop
+                        else:
+                            print(f"\n[VibeVoice OOM Protector] ❌ Out of Memory fatal. El Batch Size ya es 1 y no se puede reducir más.\n")
+                            break # Fail completely
+                    else:
+                        print(f"[VibeVoice] Entrenamiento falló con código {process.returncode}.")
+                        break # Failed for a non-OOM reason
 
         finally:
             # Cleanup the unique dataset copy to save disk space
             if os.path.exists(run_prompts_jsonl):
                 os.remove(run_prompts_jsonl)
+
+        if not training_success:
+            return ("Fallo en el entrenamiento",)
 
         return (os.path.abspath(output_dir),)
