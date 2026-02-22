@@ -291,10 +291,12 @@ class VibeVoice_LoRA_Trainer:
     FUNCTION = "train_lora"
     CATEGORY = "VibeVoice/Training"
 
-    def _read_subprocess_output(self, process):
-        """Lee la salida del subproceso asíncronamente para la consola de ComfyUI."""
+    def _read_subprocess_output(self, process, output_log):
+        """Lee la salida del subproceso asíncronamente y la guarda para análisis."""
         for line in iter(process.stdout.readline, b''):
-            print(f"[VibeVoice Train] {line.decode('utf-8', errors='replace').rstrip()}")
+            decoded_line = line.decode('utf-8', errors='replace').rstrip()
+            print(f"[VibeVoice Train] {decoded_line}")
+            output_log.append(decoded_line)
         process.stdout.close()
 
     def _patch_early_stopping(self, repo_dir):
@@ -505,66 +507,94 @@ class TrainLossEarlyStoppingCallback(TrainerCallback):
         run_prompts_jsonl = os.path.join(dataset_path, f"prompts_run_{unique_id}.jsonl")
         shutil.copy(prompts_jsonl, run_prompts_jsonl)
 
-        # Construct Command
-        command = [
-            python_cmd, "-m", "src.finetune_vibevoice_lora",
-            "--model_name_or_path", model_path_to_use,
-            "--train_jsonl", run_prompts_jsonl,
-            "--text_column_name", "text",
-            "--audio_column_name", "audio",
-            "--output_dir", output_dir,
-            "--per_device_train_batch_size", str(batch_size),
-            "--gradient_accumulation_steps", str(gradient_accum_steps),
-            "--num_train_epochs", str(epochs),
-            "--learning_rate", str(learning_rate),
-            "--bf16", "True" if mixed_precision == "bf16" else "False",
-            "--fp16", "True" if mixed_precision == "fp16" else "False",
-            "--lora_r", str(lora_rank),
-            "--lora_alpha", str(lora_alpha),
-            "--lora_target_modules", "q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
-            "--train_diffusion_head", "True",
-            "--ddpm_batch_mul", "4",
-            "--diffusion_loss_weight", "1.4",
-            "--ce_loss_weight", "0.04",
-            "--voice_prompt_drop_rate", "0.2",
-            "--logging_steps", "10",
-            "--save_strategy", "steps",
-            "--save_steps", "200",
-            "--save_total_limit", "2",
-            "--remove_unused_columns", "False",
-            "--do_train"
-        ]
-
-        print("[VibeVoice] Iniciando subproceso de entrenamiento...")
-        print("Comando:", " ".join(command))
+        # Auto-Retry Loop for OOM Protection
+        current_batch_size = batch_size
+        current_grad_accum = gradient_accum_steps
+        max_retries = 5
+        training_success = False
 
         try:
-            # Popen
-            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=repo_dir)
+            for attempt in range(max_retries):
+                # Construct Command dynamically with current batch/accum
+                command = [
+                    python_cmd, "-m", "src.finetune_vibevoice_lora",
+                    "--model_name_or_path", model_path_to_use,
+                    "--train_jsonl", run_prompts_jsonl,
+                    "--text_column_name", "text",
+                    "--audio_column_name", "audio",
+                    "--output_dir", output_dir,
+                    "--per_device_train_batch_size", str(current_batch_size),
+                    "--gradient_accumulation_steps", str(current_grad_accum),
+                    "--num_train_epochs", str(epochs),
+                    "--learning_rate", str(learning_rate),
+                    "--bf16", "True" if mixed_precision == "bf16" else "False",
+                    "--fp16", "True" if mixed_precision == "fp16" else "False",
+                    "--lora_r", str(lora_rank),
+                    "--lora_alpha", str(lora_alpha),
+                    "--lora_target_modules", "q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
+                    "--train_diffusion_head", "True",
+                    "--ddpm_batch_mul", "4",
+                    "--diffusion_loss_weight", "1.4",
+                    "--ce_loss_weight", "0.04",
+                    "--voice_prompt_drop_rate", "0.2",
+                    "--logging_steps", "10",
+                    "--save_strategy", "steps",
+                    "--save_steps", "200",
+                    "--save_total_limit", "2",
+                    "--remove_unused_columns", "False",
+                    "--do_train"
+                ]
 
-            # Read output
-            thread = threading.Thread(target=self._read_subprocess_output, args=(process,))
-            thread.start()
+                print(f"\n[VibeVoice] Iniciando entrenamiento (Intento {attempt+1}/{max_retries}) | Batch: {current_batch_size} | GradAccum: {current_grad_accum}")
 
-            # Instead of process.wait(), use a polling loop to catch ComfyUI interrupts instantly
-            while process.poll() is None:
-                if mm.processing_interrupted():
-                    print("\n[VibeVoice] Interrupción manual detectada desde ComfyUI. Cancelando entrenamiento...\n")
-                    process.terminate()
-                    process.wait()
-                    return ("Entrenamiento cancelado manualmente",)
-                time.sleep(1)
+                output_log = []
+                process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=repo_dir)
 
-            thread.join()
+                thread = threading.Thread(target=self._read_subprocess_output, args=(process, output_log))
+                thread.start()
 
-            if process.returncode == 0:
-                print(f"[VibeVoice] Entrenamiento finalizado con éxito. LoRA guardado en {output_dir}")
-            else:
-                print(f"[VibeVoice] Entrenamiento falló con código {process.returncode}.")
+                while process.poll() is None:
+                    if mm.processing_interrupted():
+                        print("\n[VibeVoice] Interrupción manual detectada desde ComfyUI. Cancelando entrenamiento...\n")
+                        process.terminate()
+                        process.wait()
+                        return ("Entrenamiento cancelado manualmente",)
+                    time.sleep(1)
+
+                thread.join()
+
+                if process.returncode == 0:
+                    print(f"[VibeVoice] Entrenamiento finalizado con éxito. LoRA guardado en {output_dir}")
+                    training_success = True
+                    break # Success, exit retry loop
+                else:
+                    full_log = "\n".join(output_log)
+                    if "OutOfMemoryError" in full_log or "out of memory" in full_log.lower():
+                        if current_batch_size > 1:
+                            print(f"\n[VibeVoice OOM Protector] ⚠️ Out of Memory detectado! Reduciendo Batch Size...")
+
+                            new_batch = max(1, current_batch_size // 2)
+                            # Maintain effective batch size (roughly) by increasing grad accum
+                            factor = current_batch_size // new_batch
+                            current_grad_accum = current_grad_accum * factor
+                            current_batch_size = new_batch
+
+                            print(f"[VibeVoice OOM Protector] Reiniciando automáticamente con Batch Size: {current_batch_size} y Grad Accum: {current_grad_accum}...\n")
+                            torch.cuda.empty_cache()
+                            continue # Retry the loop
+                        else:
+                            print(f"\n[VibeVoice OOM Protector] ❌ Out of Memory fatal. El Batch Size ya es 1 y no se puede reducir más.\n")
+                            break # Fail completely
+                    else:
+                        print(f"[VibeVoice] Entrenamiento falló con código {process.returncode}.")
+                        break # Failed for a non-OOM reason
 
         finally:
             # Cleanup the unique dataset copy to save disk space
             if os.path.exists(run_prompts_jsonl):
                 os.remove(run_prompts_jsonl)
+
+        if not training_success:
+            return ("Fallo en el entrenamiento",)
 
         return (os.path.abspath(output_dir),)
