@@ -266,7 +266,6 @@ class VibeVoice_LoRA_Trainer:
             "required": {
                 "dataset_path": ("STRING", {"forceInput": True}),
                 "base_model_path": (base_models, {"default": "microsoft/VibeVoice-1.5B"}),
-                "quantization": (["none (bf16)", "8-bit", "4-bit"], {"default": "none (bf16)"}),
                 "output_lora_name": ("STRING", {"default": "vibevoice_lora_out"}),
                 "batch_size": ("INT", {"default": 8, "min": 1, "max": 32}),
                 "gradient_accum_steps": ("INT", {"default": 16, "min": 1, "max": 128}), # Default 16 as requested
@@ -292,80 +291,6 @@ class VibeVoice_LoRA_Trainer:
         for line in iter(process.stdout.readline, b''):
             print(f"[VibeVoice Train] {line.decode('utf-8', errors='replace').rstrip()}")
         process.stdout.close()
-
-    def _patch_training_script(self, repo_dir):
-        """Patches the training script to support 4-bit/8-bit quantization."""
-        script_path = os.path.join(repo_dir, "src", "finetune_vibevoice_lora.py")
-        if not os.path.exists(script_path):
-            print(f"[VibeVoice Patch] Script not found at {script_path}")
-            return False
-
-        with open(script_path, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        # Check if already patched
-        if "load_in_4bit" in content and "BitsAndBytesConfig" in content:
-            return True
-
-        print("[VibeVoice Patch] Patching training script for quantization support...")
-
-        # 1. Add Import
-        if "from transformers import (" in content:
-            content = content.replace(
-                "from transformers import (",
-                "from transformers import ( BitsAndBytesConfig,"
-            )
-        else:
-             content = "from transformers import BitsAndBytesConfig\n" + content
-
-        # 2. Add Arguments to ModelArguments
-        search_str = "class ModelArguments:\n"
-        if search_str in content:
-            # Insert fields
-            fields = (
-                "    load_in_4bit: bool = field(default=False, metadata={'help': 'Load in 4-bit mode'})\n"
-                "    load_in_8bit: bool = field(default=False, metadata={'help': 'Load in 8-bit mode'})\n"
-            )
-            content = content.replace(search_str, search_str + fields)
-
-        # 3. Modify Model Loading
-        target_block = (
-            "    model = VibeVoiceForConditionalGeneration.from_pretrained(\n"
-            "        model_args.model_name_or_path,\n"
-            "        torch_dtype=dtype,\n"
-            "    )"
-        )
-
-        replacement_block = (
-            "    quantization_config = None\n"
-            "    if getattr(model_args, 'load_in_4bit', False):\n"
-            "        quantization_config = BitsAndBytesConfig(\n"
-            "            load_in_4bit=True,\n"
-            "            bnb_4bit_compute_dtype=dtype,\n"
-            "            bnb_4bit_use_double_quant=True,\n"
-            "            bnb_4bit_quant_type='nf4',\n"
-            "        )\n"
-            "    elif getattr(model_args, 'load_in_8bit', False):\n"
-            "        quantization_config = BitsAndBytesConfig(\n"
-            "            load_in_8bit=True,\n"
-            "        )\n\n"
-            "    model = VibeVoiceForConditionalGeneration.from_pretrained(\n"
-            "        model_args.model_name_or_path,\n"
-            "        torch_dtype=dtype,\n"
-            "        quantization_config=quantization_config,\n"
-            "    )"
-        )
-
-        if target_block in content:
-             content = content.replace(target_block, replacement_block)
-        else:
-             print("[VibeVoice Patch] Warning: Could not find exact model loading block to patch. Quantization might not work.")
-
-        with open(script_path, "w", encoding="utf-8") as f:
-            f.write(content)
-
-        print("[VibeVoice Patch] Patch applied successfully.")
-        return True
 
     def _patch_flash_attention_import(self, repo_dir):
         """Patches modeling_vibevoice.py to fix FlashAttentionKwargs import error."""
@@ -414,7 +339,6 @@ class VibeVoice_LoRA_Trainer:
                 return False
 
         # Patch script
-        self._patch_training_script(repo_dir)
         self._patch_flash_attention_import(repo_dir)
 
         # 2. Create Venv if missing
@@ -453,7 +377,7 @@ class VibeVoice_LoRA_Trainer:
                 subprocess.check_call([pip_cmd, "install", f"transformers=={transformers_version}"], cwd=repo_dir)
 
                 # Install other potentially missing deps
-                subprocess.check_call([pip_cmd, "install", "accelerate", "peft", "bitsandbytes", "soundfile", "librosa"], cwd=repo_dir)
+                subprocess.check_call([pip_cmd, "install", "accelerate", "peft", "soundfile", "librosa"], cwd=repo_dir)
 
                 # Create marker
                 with open(marker_file, "w") as f:
@@ -465,7 +389,7 @@ class VibeVoice_LoRA_Trainer:
 
         return python_cmd
 
-    def train_lora(self, dataset_path, base_model_path, quantization, output_lora_name, batch_size,
+    def train_lora(self, dataset_path, base_model_path, output_lora_name, batch_size,
                    gradient_accum_steps, epochs, learning_rate, mixed_precision,
                    lora_rank, lora_alpha, transformers_version, custom_model_path=""):
 
@@ -525,12 +449,6 @@ class VibeVoice_LoRA_Trainer:
             "--logging_steps", "10",
             "--save_strategy", "epoch"
         ]
-
-        # Append Quantization Flags
-        if quantization == "8-bit":
-            command.extend(["--load_in_8bit", "True"])
-        elif quantization == "4-bit":
-             command.extend(["--load_in_4bit", "True"])
 
         print("[VibeVoice] Iniciando subproceso de entrenamiento...")
         print("Comando:", " ".join(command))
