@@ -12,6 +12,8 @@ import numpy as np
 from pydub import AudioSegment
 from transformers import pipeline
 import folder_paths
+import comfy.model_management as mm
+import time
 
 # Configure logging
 import logging
@@ -292,6 +294,54 @@ class VibeVoice_LoRA_Trainer:
             print(f"[VibeVoice Train] {line.decode('utf-8', errors='replace').rstrip()}")
         process.stdout.close()
 
+    def _patch_early_stopping(self, repo_dir):
+        target_file = os.path.join(repo_dir, "src", "finetune_vibevoice_lora.py")
+        if not os.path.exists(target_file):
+            return False
+
+        with open(target_file, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        if "TrainLossEarlyStoppingCallback" in content:
+            return True
+
+        print("[VibeVoice Patch] Injecting custom Early Stopping autopilot...")
+
+        callback_code = """
+from transformers import TrainerCallback
+class TrainLossEarlyStoppingCallback(TrainerCallback):
+    def __init__(self, patience=5, threshold=0.005):
+        self.patience = patience
+        self.threshold = threshold
+        self.best_loss = float('inf')
+        self.counter = 0
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if logs and "loss" in logs:
+            current_loss = logs["loss"]
+            if current_loss < self.best_loss - self.threshold:
+                self.best_loss = current_loss
+                self.counter = 0
+            else:
+                self.counter += 1
+                if self.counter >= self.patience:
+                    print(f"\\n[VibeVoice] AUTO-STOP TRIGGERED: Loss hasn't improved by {self.threshold} for {self.patience} logging steps.\\n")
+                    control.should_training_stop = True
+"""
+        # Insert callback code before main()
+        if "def main():" in content:
+            content = content.replace("def main():", callback_code + "\ndef main():")
+
+        # Inject callback into Trainer instantiation
+        trainer_init = "trainer = Trainer("
+        trainer_replacement = "trainer = Trainer(\n        callbacks=[TrainLossEarlyStoppingCallback(patience=5)],"
+        if trainer_init in content:
+            content = content.replace(trainer_init, trainer_replacement)
+
+        with open(target_file, "w", encoding="utf-8") as f:
+            f.write(content)
+        return True
+
     def _patch_flash_attention_import(self, repo_dir):
         """Patches modeling_vibevoice.py to fix FlashAttentionKwargs import error."""
         target_file = os.path.join(repo_dir, "src", "vibevoice", "modular", "modeling_vibevoice.py")
@@ -340,6 +390,7 @@ class VibeVoice_LoRA_Trainer:
 
         # Patch script
         self._patch_flash_attention_import(repo_dir)
+        self._patch_early_stopping(repo_dir)
 
         # 2. Create Venv if missing
         if not os.path.exists(venv_dir):
@@ -460,7 +511,15 @@ class VibeVoice_LoRA_Trainer:
         thread = threading.Thread(target=self._read_subprocess_output, args=(process,))
         thread.start()
 
-        process.wait()
+        # Instead of process.wait(), use a polling loop to catch ComfyUI interrupts instantly
+        while process.poll() is None:
+            if mm.processing_interrupted():
+                print("\n[VibeVoice] Interrupción manual detectada desde ComfyUI. Cancelando entrenamiento...\n")
+                process.terminate()
+                process.wait()
+                return ("Entrenamiento cancelado manualmente",)
+            time.sleep(1)
+
         thread.join()
 
         if process.returncode == 0:
