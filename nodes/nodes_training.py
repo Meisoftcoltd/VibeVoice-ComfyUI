@@ -224,13 +224,16 @@ class VibeVoice_Dataset_Preparator:
                     transcription = transcription.replace('\n', ' ').replace('|', '')
 
                     if transcription:
+                        # VibeVoice strictly requires speaker tags to parse the dataset
+                        formatted_text = f"Speaker 0: {transcription}"
+
                         entry = {
-                            "text": transcription,
+                            "text": formatted_text,
                             "audio": os.path.abspath(chunk_filepath)
                         }
                         jsonl_entries.append(entry)
                         chunk_counter += 1
-                        print(f"Procesado: {chunk_filename} -> {transcription[:50]}...")
+                        print(f"Procesado: {chunk_filename} -> {formatted_text[:50]}...")
 
             except Exception as e:
                 print(f"[Warning] Error procesando archivo completo {audio_path}: {e}")
