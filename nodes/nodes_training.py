@@ -392,11 +392,12 @@ class TrainLossEarlyStoppingCallback(TrainerCallback):
             return True  # Already patched
 
         # Intercept the model(**inputs) call to strip kwargs that crash Qwen2
+        # \s* matches spaces and newlines (since it's formatted across multiple lines)
         pattern = r"outputs\s*=\s*model\(\s*\*\*inputs\s*\)"
 
         if re.search(pattern, content):
             replacement = (
-                "inputs_copy = {k: v for k, v in inputs.items() if k not in ['labels', 'text', 'audio']}\n"
+                "inputs_copy = {k: v for k, v in inputs.items() if k not in ['labels', 'text', 'audio', 'voice_prompts']}\n"
                 "        outputs = model(**inputs_copy)"
             )
             content = re.sub(pattern, replacement, content)
