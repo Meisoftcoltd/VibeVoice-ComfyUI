@@ -310,10 +310,11 @@ class VibeVoice_LoRA_Trainer:
         with open(target_file, "r", encoding="utf-8") as f:
             content = f.read()
 
-        # Clean out old callback code to prevent duplicates
+        # Robust cleanup: Remove any previous versions of our custom callbacks
+        # by deleting the class definition up to the next top-level definition (@dataclass or def)
         import re
-        content = re.sub(r"class TrainLossEarlyStoppingCallback.*?control\.should_training_stop = True\n", "", content, flags=re.DOTALL)
-        content = re.sub(r"class SmartEarlyStoppingAndSaveCallback.*?except Exception:\n\s+pass\n", "", content, flags=re.DOTALL)
+        content = re.sub(r"class TrainLossEarlyStoppingCallback\(TrainerCallback\):.*?(?=\n@|\ndef )", "", content, flags=re.DOTALL)
+        content = re.sub(r"class SmartEarlyStoppingAndSaveCallback\(TrainerCallback\):.*?(?=\n@|\ndef )", "", content, flags=re.DOTALL)
 
         callback_code = f"""
 class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
@@ -370,6 +371,28 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                         print(f"\\n[VibeVoice Smart Saver] 🗑️ Deleted worst checkpoint: {{worst_ckpt}} (Loss: {{worst_loss:.4f}})")
                     except Exception:
                         pass
+
+    def on_train_end(self, args, state, control, **kwargs):
+        # Triggered when training finishes (naturally or by early stopping)
+        import os
+        import shutil
+        if not self.best_checkpoints:
+            return
+
+        best_loss, best_ckpt = self.best_checkpoints[0]  # Index 0 is the best (lowest loss)
+        best_lora_dir = os.path.join(best_ckpt, "lora")
+        final_lora_dir = os.path.join(args.output_dir, "lora")
+
+        print(f"\\n[VibeVoice Smart Saver] 🏆 Training complete. Restoring BEST model from {{os.path.basename(best_ckpt)}} (Loss: {{best_loss:.4f}}) as the final output...")
+
+        if os.path.exists(best_lora_dir):
+            try:
+                if os.path.exists(final_lora_dir):
+                    shutil.rmtree(final_lora_dir)
+                shutil.copytree(best_lora_dir, final_lora_dir)
+                print("[VibeVoice Smart Saver] ✅ Best model successfully set as the final output in the main lora folder.\\n")
+            except Exception as e:
+                print(f"[VibeVoice Smart Saver] ⚠️ Could not copy best model: {{e}}")
 """
 
         # Inject class definition
