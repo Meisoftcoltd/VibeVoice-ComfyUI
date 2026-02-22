@@ -307,7 +307,7 @@ class VibeVoice_LoRA_Trainer:
         if not os.path.exists(target_file):
             return False
 
-        # 1. Restore the file to its original state from git to wipe any broken regex patches
+        # 1. Restore the file to its original state from git
         import subprocess
         try:
             subprocess.check_call(["git", "checkout", "--", "src/finetune_vibevoice_lora.py"], cwd=repo_dir)
@@ -320,7 +320,6 @@ class VibeVoice_LoRA_Trainer:
 
         import re
 
-        # Safely formatted callback code with NO nested newline escapes
         callback_code = f"""
 # --- VIBEVOICE CUSTOM CALLBACK START ---
 import os
@@ -329,43 +328,51 @@ from transformers import TrainerCallback
 
 class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
     def __init__(self, patience={patience}, threshold={threshold}, keep_best_n={save_total_limit}):
-        self.patience = patience
+        self.patience = patience  # Now represents EPOCHS, not micro-steps
         self.threshold = threshold
         self.keep_best_n = keep_best_n
         self.best_diff_loss = float('inf')
         self.best_ce_loss = float('inf')
         self.counter = 0
         self.best_checkpoints = []
-        self.last_loss = float('inf')
+        self.last_diff_loss = None
+        self.last_ce_loss = None
+        self.last_total_loss = float('inf')
 
     def on_log(self, args, state, control, logs=None, **kwargs):
+        # Only capture the latest metrics, do not evaluate here
         if logs:
-            diff_loss = logs.get("train/diffusion_loss", None)
-            ce_loss = logs.get("train/ce_loss", None)
-            total_loss = logs.get("loss", None)
+            if "train/diffusion_loss" in logs:
+                self.last_diff_loss = logs.get("train/diffusion_loss")
+            if "train/ce_loss" in logs:
+                self.last_ce_loss = logs.get("train/ce_loss")
+            if "loss" in logs:
+                self.last_total_loss = logs.get("loss")
+            elif self.last_diff_loss is not None and self.last_ce_loss is not None:
+                self.last_total_loss = self.last_diff_loss + self.last_ce_loss
 
-            if diff_loss is not None and ce_loss is not None:
-                self.last_loss = total_loss if total_loss is not None else (diff_loss + ce_loss)
+    def on_epoch_end(self, args, state, control, **kwargs):
+        # Evaluate Early Stopping only once per epoch to avoid micro-batch noise
+        if self.last_diff_loss is not None and self.last_ce_loss is not None:
+            diff_improved = self.last_diff_loss < (self.best_diff_loss - self.threshold)
+            ce_improved = self.last_ce_loss < (self.best_ce_loss - self.threshold)
 
-                diff_improved = diff_loss < (self.best_diff_loss - self.threshold)
-                ce_improved = ce_loss < (self.best_ce_loss - self.threshold)
-
-                if diff_improved or ce_improved:
-                    if diff_improved: self.best_diff_loss = diff_loss
-                    if ce_improved: self.best_ce_loss = ce_loss
-                    self.counter = 0
-                else:
-                    self.counter += 1
-                    if self.counter >= self.patience:
-                        print("")
-                        print(f"[VibeVoice Smart Stop] AUTO-STOP: Degradation in BOTH acoustic and text logic for {{self.patience}} steps.")
-                        print("")
-                        control.should_training_stop = True
+            if diff_improved or ce_improved:
+                if diff_improved: self.best_diff_loss = self.last_diff_loss
+                if ce_improved: self.best_ce_loss = self.last_ce_loss
+                self.counter = 0
+            else:
+                self.counter += 1
+                if self.counter >= self.patience:
+                    print("")
+                    print(f"[VibeVoice Smart Stop] AUTO-STOP: No improvement for {{self.patience}} FULL EPOCHS.")
+                    print("")
+                    control.should_training_stop = True
 
     def on_save(self, args, state, control, **kwargs):
         ckpt_dir = os.path.join(args.output_dir, f"checkpoint-{{state.global_step}}")
         if os.path.exists(ckpt_dir):
-            self.best_checkpoints.append((self.last_loss, ckpt_dir))
+            self.best_checkpoints.append((self.last_total_loss, ckpt_dir))
             self.best_checkpoints.sort(key=lambda x: x[0])
 
             while len(self.best_checkpoints) > self.keep_best_n:
@@ -400,8 +407,8 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
 # --- VIBEVOICE CUSTOM CALLBACK END ---
 """
 
-        # 3. Inject the code safely right before def main (using Regex to catch type hints)
-        content = re.sub(r"def main\s*\([^)]*\)\s*(->\s*None)?\s*:", callback_code + r"\n\g<0>", content, count=1)
+        # 3. Inject the code safely right before def main
+        content = re.sub(r"(def main\s*\([^)]*\)\s*(->\s*None)?\s*:)", callback_code + r"\n\g<1>", content, count=1)
 
         # 4. Safely update Trainer instantiation
         callback_string = f"callbacks=[SmartEarlyStoppingAndSaveCallback(patience={patience}, threshold={threshold}, keep_best_n={save_total_limit})]"
@@ -416,7 +423,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
         with open(target_file, "w", encoding="utf-8") as f:
             f.write(content)
 
-        print("[VibeVoice Patch] Successfully applied Smart Checkpointing patch.")
+        print("[VibeVoice Patch] Successfully applied Epoch-based Smart Checkpointing patch.")
         return True
 
     def _patch_flash_attention_import(self, repo_dir):
