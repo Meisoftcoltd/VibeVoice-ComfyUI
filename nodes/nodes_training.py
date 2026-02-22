@@ -379,37 +379,24 @@ class TrainLossEarlyStoppingCallback(TrainerCallback):
             print("[VibeVoice Patch] Warning: Could not find FlashAttentionKwargs import line to patch.")
             return False
 
-    def _patch_modeling_kwargs(self, repo_dir):
-        target_file = os.path.join(repo_dir, "src", "vibevoice", "modular", "modeling_vibevoice.py")
+    def _patch_peft_task_type(self, repo_dir):
+        target_file = os.path.join(repo_dir, "src", "finetune_vibevoice_lora.py")
         if not os.path.exists(target_file):
             return False
 
         with open(target_file, "r", encoding="utf-8") as f:
             content = f.read()
 
-        # Check if already patched
-        if "kwargs.pop('labels', None)" in content:
-            return True
-
-        # Intercept the kwargs right before they are passed to the language model
-        search_str = "outputs = self.language_model("
-        replacement = (
-            "kwargs.pop('labels', None)\n"
-            "        kwargs.pop('text', None)\n"
-            "        kwargs.pop('audio', None)\n"
-            "        kwargs.pop('voice_prompts', None)\n"
-            "        outputs = self.language_model("
-        )
+        search_str = "task_type=TaskType.CAUSAL_LM,"
+        replacement = "task_type=TaskType.FEATURE_EXTRACTION,"
 
         if search_str in content:
             content = content.replace(search_str, replacement)
             with open(target_file, "w", encoding="utf-8") as f:
                 f.write(content)
-            print("[VibeVoice Patch] Successfully patched modeling_vibevoice.py to prevent kwargs crash.")
+            print("[VibeVoice Patch] Successfully patched PEFT TaskType to prevent labels kwarg injection.")
             return True
-        else:
-            print("[VibeVoice Patch] Warning: Could not find self.language_model in modeling_vibevoice.py")
-            return False
+        return False
 
     def _setup_environment(self, repo_dir, venv_dir, transformers_version):
         """Sets up the training repository and virtual environment."""
@@ -426,7 +413,7 @@ class TrainLossEarlyStoppingCallback(TrainerCallback):
         # Patch script
         self._patch_flash_attention_import(repo_dir)
         self._patch_early_stopping(repo_dir)
-        self._patch_modeling_kwargs(repo_dir)  # <--- Updated call
+        self._patch_peft_task_type(repo_dir)  # <--- New PEFT patch
 
         # 2. Create Venv if missing
         if not os.path.exists(venv_dir):
