@@ -395,9 +395,8 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
 # --- VIBEVOICE CUSTOM CALLBACK END ---
 """
 
-        # 3. Inject the code safely right before def main():
-        if "def main():" in content:
-            content = content.replace("def main():", callback_code + "\ndef main():")
+        # 3. Inject the code safely right before def main (using Regex to catch type hints)
+        content = re.sub(r"def main\s*\([^)]*\)\s*(->\s*None)?\s*:", callback_code + r"\n\g<0>", content, count=1)
 
         # 4. Safely update Trainer instantiation
         callback_string = f"callbacks=[SmartEarlyStoppingAndSaveCallback(patience={patience}, threshold={threshold}, keep_best_n={save_total_limit})]"
