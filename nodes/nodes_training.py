@@ -379,35 +379,37 @@ class TrainLossEarlyStoppingCallback(TrainerCallback):
             print("[VibeVoice Patch] Warning: Could not find FlashAttentionKwargs import line to patch.")
             return False
 
-    def _patch_trainer_inputs(self, repo_dir):
-        import re
-        target_file = os.path.join(repo_dir, "src", "finetune_vibevoice_lora.py")
+    def _patch_modeling_kwargs(self, repo_dir):
+        target_file = os.path.join(repo_dir, "src", "vibevoice", "modular", "modeling_vibevoice.py")
         if not os.path.exists(target_file):
             return False
 
         with open(target_file, "r", encoding="utf-8") as f:
             content = f.read()
 
-        if "inputs_copy =" in content:
-            return True  # Already patched
-
-        # Intercept the model(**inputs) call to strip kwargs that crash Qwen2
-        # \s* matches spaces and newlines (since it's formatted across multiple lines)
-        pattern = r"outputs\s*=\s*model\(\s*\*\*inputs\s*\)"
-
-        if re.search(pattern, content):
-            replacement = (
-                "inputs_copy = {k: v for k, v in inputs.items() if k not in ['labels', 'text', 'audio', 'voice_prompts']}\n"
-                "        outputs = model(**inputs_copy)"
-            )
-            content = re.sub(pattern, replacement, content)
-
-            with open(target_file, "w", encoding="utf-8") as f:
-                f.write(content)
-            print("[VibeVoice Patch] Successfully sanitized model inputs to prevent Qwen2 kwargs crash.")
+        # Check if already patched
+        if "kwargs.pop('labels', None)" in content:
             return True
 
-        return False
+        # Intercept the kwargs right before they are passed to the language model
+        search_str = "outputs = self.language_model("
+        replacement = (
+            "kwargs.pop('labels', None)\n"
+            "        kwargs.pop('text', None)\n"
+            "        kwargs.pop('audio', None)\n"
+            "        kwargs.pop('voice_prompts', None)\n"
+            "        outputs = self.language_model("
+        )
+
+        if search_str in content:
+            content = content.replace(search_str, replacement)
+            with open(target_file, "w", encoding="utf-8") as f:
+                f.write(content)
+            print("[VibeVoice Patch] Successfully patched modeling_vibevoice.py to prevent kwargs crash.")
+            return True
+        else:
+            print("[VibeVoice Patch] Warning: Could not find self.language_model in modeling_vibevoice.py")
+            return False
 
     def _setup_environment(self, repo_dir, venv_dir, transformers_version):
         """Sets up the training repository and virtual environment."""
@@ -424,7 +426,7 @@ class TrainLossEarlyStoppingCallback(TrainerCallback):
         # Patch script
         self._patch_flash_attention_import(repo_dir)
         self._patch_early_stopping(repo_dir)
-        self._patch_trainer_inputs(repo_dir)  # <--- Add this new call
+        self._patch_modeling_kwargs(repo_dir)  # <--- Updated call
 
         # 2. Create Venv if missing
         if not os.path.exists(venv_dir):
