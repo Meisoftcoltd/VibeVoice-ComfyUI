@@ -320,6 +320,7 @@ class VibeVoice_LoRA_Trainer:
 
         import re
 
+        # Safely formatted callback code with NO nested newline escapes
         callback_code = f"""
 # --- VIBEVOICE CUSTOM CALLBACK START ---
 import os
@@ -356,7 +357,9 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                 else:
                     self.counter += 1
                     if self.counter >= self.patience:
-                        print(f"\\n[VibeVoice Smart Stop] 🛑 AUTO-STOP: Degradation in BOTH acoustic and text logic for {{self.patience}} steps.\\n")
+                        print("")
+                        print(f"[VibeVoice Smart Stop] AUTO-STOP: Degradation in BOTH acoustic and text logic for {{self.patience}} steps.")
+                        print("")
                         control.should_training_stop = True
 
     def on_save(self, args, state, control, **kwargs):
@@ -370,7 +373,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                 if os.path.exists(worst_ckpt):
                     try:
                         shutil.rmtree(worst_ckpt)
-                        print(f"\\n[VibeVoice Smart Saver] 🗑️ Deleted worst checkpoint: {{worst_ckpt}} (Loss: {{worst_loss:.4f}})")
+                        print(f"[VibeVoice Smart Saver] Deleted worst checkpoint: {{worst_ckpt}} (Loss: {{worst_loss:.4f}})")
                     except Exception:
                         pass
 
@@ -382,16 +385,18 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
         best_lora_dir = os.path.join(best_ckpt, "lora")
         final_lora_dir = os.path.join(args.output_dir, "lora")
 
-        print(f"\\n[VibeVoice Smart Saver] 🏆 Training complete. Restoring BEST model from {{os.path.basename(best_ckpt)}} (Loss: {{best_loss:.4f}}) as the final output...")
+        print("")
+        print(f"[VibeVoice Smart Saver] Training complete. Restoring BEST model from {{os.path.basename(best_ckpt)}} (Loss: {{best_loss:.4f}}) as the final output...")
 
         if os.path.exists(best_lora_dir):
             try:
                 if os.path.exists(final_lora_dir):
                     shutil.rmtree(final_lora_dir)
                 shutil.copytree(best_lora_dir, final_lora_dir)
-                print("[VibeVoice Smart Saver] ✅ Best model successfully set as the final output in the main lora folder.\\n")
+                print("[VibeVoice Smart Saver] Best model successfully set as the final output in the main lora folder.")
+                print("")
             except Exception as e:
-                print(f"[VibeVoice Smart Saver] ⚠️ Could not copy best model: {{e}}")
+                print(f"[VibeVoice Smart Saver] Could not copy best model: {{e}}")
 # --- VIBEVOICE CUSTOM CALLBACK END ---
 """
 
