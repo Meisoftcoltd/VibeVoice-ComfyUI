@@ -279,6 +279,8 @@ class VibeVoice_LoRA_Trainer:
                 "mixed_precision": (["bf16", "fp16", "no"], {"default": "bf16"}),
                 "lora_rank": ("INT", {"default": 32, "min": 4, "max": 128}),
                 "lora_alpha": ("INT", {"default": 64, "min": 8, "max": 256}),
+                "early_stopping_patience": ("INT", {"default": 25, "min": 1, "max": 100, "tooltip": "Number of evaluation steps without improvement before stopping."}),
+                "early_stopping_threshold": ("FLOAT", {"default": 0.002, "min": 0.0001, "max": 0.1, "step": 0.001, "tooltip": "Minimum improvement required to reset the patience counter."}),
                 "transformers_version": ("STRING", {"default": "4.51.3", "multiline": False}), # Providing flexibility
             },
             "optional": {
@@ -299,7 +301,7 @@ class VibeVoice_LoRA_Trainer:
             output_log.append(decoded_line)
         process.stdout.close()
 
-    def _patch_early_stopping(self, repo_dir):
+    def _patch_early_stopping(self, repo_dir, patience, threshold):
         target_file = os.path.join(repo_dir, "src", "finetune_vibevoice_lora.py")
         if not os.path.exists(target_file):
             return False
@@ -307,15 +309,12 @@ class VibeVoice_LoRA_Trainer:
         with open(target_file, "r", encoding="utf-8") as f:
             content = f.read()
 
-        if "TrainLossEarlyStoppingCallback" in content:
-            return True
-
-        print("[VibeVoice Patch] Injecting custom Early Stopping autopilot...")
-
-        callback_code = """
+        # We inject the class definition unconditionally (or replace it if we need to update values)
+        # Using string formatting to inject the UI parameters
+        callback_code = f"""
 from transformers import TrainerCallback
 class TrainLossEarlyStoppingCallback(TrainerCallback):
-    def __init__(self, patience=5, threshold=0.005):
+    def __init__(self, patience={patience}, threshold={threshold}):
         self.patience = patience
         self.threshold = threshold
         self.best_loss = float('inf')
@@ -330,18 +329,44 @@ class TrainLossEarlyStoppingCallback(TrainerCallback):
             else:
                 self.counter += 1
                 if self.counter >= self.patience:
-                    print(f"\\n[VibeVoice] AUTO-STOP TRIGGERED: Loss hasn't improved by {self.threshold} for {self.patience} logging steps.\\n")
+                    print(f"\\n[VibeVoice] AUTO-STOP TRIGGERED: Loss hasn't improved by {{self.threshold}} for {{self.patience}} logging steps.\\n")
                     control.should_training_stop = True
 """
-        # Insert callback code before main()
-        if "def main():" in content:
-            content = content.replace("def main():", callback_code + "\ndef main():")
 
-        # Inject callback into Trainer instantiation
-        trainer_init = "trainer = Trainer("
-        trainer_replacement = "trainer = Trainer(\n        callbacks=[TrainLossEarlyStoppingCallback(patience=5)],"
-        if trainer_init in content:
-            content = content.replace(trainer_init, trainer_replacement)
+        # If the class already exists, we might need to overwrite it, but for simplicity,
+        # let's assume standard behavior where we just inject it if missing, or update the Trainer instantiation.
+        # A more robust way is to just replace the whole file content related to this if it exists,
+        # but since we completely rewrite the `target_file` below, it's fine.
+
+        # Clean up old patch if it exists so we can inject fresh values
+        if "class TrainLossEarlyStoppingCallback" in content:
+            # It's complex to regex out a whole class. A simpler approach is to rebuild from a clean state,
+            # but since ComfyUI nodes run statefully, let's just forcefully update the instantiation line.
+
+            # Find the Trainer instantiation and update the patience value
+            import re
+            content = re.sub(
+                r"callbacks=\[TrainLossEarlyStoppingCallback\(patience=\d+\)\]",
+                f"callbacks=[TrainLossEarlyStoppingCallback(patience={patience})]",
+                content
+            )
+
+            # Update the default init values in the class definition
+            content = re.sub(
+                r"def __init__\(self, patience=\d+, threshold=[0-9.]+\):",
+                f"def __init__(self, patience={patience}, threshold={threshold}):",
+                content
+            )
+
+        else:
+            # First time patching
+            if "def main():" in content:
+                content = content.replace("def main():", callback_code + "\ndef main():")
+
+            trainer_init = "trainer = Trainer("
+            trainer_replacement = f"trainer = Trainer(\n        callbacks=[TrainLossEarlyStoppingCallback(patience={patience})],"
+            if trainer_init in content:
+                content = content.replace(trainer_init, trainer_replacement)
 
         with open(target_file, "w", encoding="utf-8") as f:
             f.write(content)
@@ -400,7 +425,7 @@ class TrainLossEarlyStoppingCallback(TrainerCallback):
             return True
         return False
 
-    def _setup_environment(self, repo_dir, venv_dir, transformers_version):
+    def _setup_environment(self, repo_dir, venv_dir, transformers_version, patience, threshold):
         """Sets up the training repository and virtual environment."""
 
         # 1. Clone Repo if missing
@@ -414,7 +439,7 @@ class TrainLossEarlyStoppingCallback(TrainerCallback):
 
         # Patch script
         self._patch_flash_attention_import(repo_dir)
-        self._patch_early_stopping(repo_dir)
+        self._patch_early_stopping(repo_dir, patience, threshold)
         self._patch_peft_task_type(repo_dir)  # <--- New PEFT patch
 
         # 2. Create Venv if missing
@@ -467,7 +492,8 @@ class TrainLossEarlyStoppingCallback(TrainerCallback):
 
     def train_lora(self, dataset_path, base_model_path, output_lora_name, batch_size,
                    gradient_accum_steps, epochs, learning_rate, mixed_precision,
-                   lora_rank, lora_alpha, transformers_version, custom_model_path=""):
+                   lora_rank, lora_alpha, early_stopping_patience, early_stopping_threshold,
+                   transformers_version, custom_model_path=""):
 
         # Resolve model path
         model_path_to_use = base_model_path
@@ -482,7 +508,7 @@ class TrainLossEarlyStoppingCallback(TrainerCallback):
         venv_dir = os.path.join(current_dir, "vibevoice_venv")
 
         # Setup Environment
-        python_cmd = self._setup_environment(repo_dir, venv_dir, transformers_version)
+        python_cmd = self._setup_environment(repo_dir, venv_dir, transformers_version, early_stopping_patience, early_stopping_threshold)
         if not python_cmd:
             return ("Error during setup",)
 
