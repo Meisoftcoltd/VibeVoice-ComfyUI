@@ -307,16 +307,25 @@ class VibeVoice_LoRA_Trainer:
         if not os.path.exists(target_file):
             return False
 
+        # 1. Restore the file to its original state from git to wipe any broken regex patches
+        import subprocess
+        try:
+            subprocess.check_call(["git", "checkout", "--", "src/finetune_vibevoice_lora.py"], cwd=repo_dir)
+        except Exception as e:
+            print(f"[VibeVoice Patch] Warning: Could not run git checkout: {e}")
+
+        # 2. Read the clean file
         with open(target_file, "r", encoding="utf-8") as f:
             content = f.read()
 
-        # Robust cleanup: Remove any previous versions of our custom callbacks
-        # by deleting the class definition up to the next top-level definition (@dataclass or def)
         import re
-        content = re.sub(r"class TrainLossEarlyStoppingCallback\(TrainerCallback\):.*?(?=\n@|\ndef )", "", content, flags=re.DOTALL)
-        content = re.sub(r"class SmartEarlyStoppingAndSaveCallback\(TrainerCallback\):.*?(?=\n@|\ndef )", "", content, flags=re.DOTALL)
 
         callback_code = f"""
+# --- VIBEVOICE CUSTOM CALLBACK START ---
+import os
+import shutil
+from transformers import TrainerCallback
+
 class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
     def __init__(self, patience={patience}, threshold={threshold}, keep_best_n={save_total_limit}):
         self.patience = patience
@@ -337,11 +346,9 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
             if diff_loss is not None and ce_loss is not None:
                 self.last_loss = total_loss if total_loss is not None else (diff_loss + ce_loss)
 
-                # Check metrics separately!
                 diff_improved = diff_loss < (self.best_diff_loss - self.threshold)
                 ce_improved = ce_loss < (self.best_ce_loss - self.threshold)
 
-                # If EITHER improves, we are good.
                 if diff_improved or ce_improved:
                     if diff_improved: self.best_diff_loss = diff_loss
                     if ce_improved: self.best_ce_loss = ce_loss
@@ -353,16 +360,11 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                         control.should_training_stop = True
 
     def on_save(self, args, state, control, **kwargs):
-        # Triggered right after HF saves a new checkpoint
-        import os
-        import shutil
         ckpt_dir = os.path.join(args.output_dir, f"checkpoint-{{state.global_step}}")
         if os.path.exists(ckpt_dir):
             self.best_checkpoints.append((self.last_loss, ckpt_dir))
-            # Sort by loss (Lowest is Best)
             self.best_checkpoints.sort(key=lambda x: x[0])
 
-            # Delete the WORST checkpoints if we exceed the limit
             while len(self.best_checkpoints) > self.keep_best_n:
                 worst_loss, worst_ckpt = self.best_checkpoints.pop(-1)
                 if os.path.exists(worst_ckpt):
@@ -373,13 +375,10 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                         pass
 
     def on_train_end(self, args, state, control, **kwargs):
-        # Triggered when training finishes (naturally or by early stopping)
-        import os
-        import shutil
         if not self.best_checkpoints:
             return
 
-        best_loss, best_ckpt = self.best_checkpoints[0]  # Index 0 is the best (lowest loss)
+        best_loss, best_ckpt = self.best_checkpoints[0]
         best_lora_dir = os.path.join(best_ckpt, "lora")
         final_lora_dir = os.path.join(args.output_dir, "lora")
 
@@ -393,13 +392,14 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                 print("[VibeVoice Smart Saver] ✅ Best model successfully set as the final output in the main lora folder.\\n")
             except Exception as e:
                 print(f"[VibeVoice Smart Saver] ⚠️ Could not copy best model: {{e}}")
+# --- VIBEVOICE CUSTOM CALLBACK END ---
 """
 
-        # Inject class definition
-        if "from transformers import TrainerCallback" in content:
-            content = content.replace("from transformers import TrainerCallback", "from transformers import TrainerCallback\nimport shutil\nimport os\n" + callback_code)
+        # 3. Inject the code safely right before def main():
+        if "def main():" in content:
+            content = content.replace("def main():", callback_code + "\ndef main():")
 
-        # Inject or update the callbacks argument in Trainer instantiation
+        # 4. Safely update Trainer instantiation
         callback_string = f"callbacks=[SmartEarlyStoppingAndSaveCallback(patience={patience}, threshold={threshold}, keep_best_n={save_total_limit})]"
 
         if "callbacks=[" in content:
@@ -411,6 +411,8 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
 
         with open(target_file, "w", encoding="utf-8") as f:
             f.write(content)
+
+        print("[VibeVoice Patch] Successfully applied Smart Checkpointing patch.")
         return True
 
     def _patch_flash_attention_import(self, repo_dir):
