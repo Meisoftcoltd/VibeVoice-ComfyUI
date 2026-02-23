@@ -352,8 +352,11 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                 self.last_total_loss = self.last_diff_loss + self.last_ce_loss
 
     def on_epoch_end(self, args, state, control, **kwargs):
-        # Evaluate Early Stopping only once per epoch to avoid micro-batch noise
         if self.last_diff_loss is not None and self.last_ce_loss is not None:
+            current_epoch = int(round(state.epoch or 0))
+            print("")
+            print(f"📊 [EPOCH {{current_epoch}} SUMMARY] 📝 Text Loss: {{self.last_ce_loss:.4f}} | 🎵 Audio Loss: {{self.last_diff_loss:.4f}} | 📉 Total: {{self.last_total_loss:.4f}}")
+
             diff_improved = self.last_diff_loss < (self.best_diff_loss - self.threshold)
             ce_improved = self.last_ce_loss < (self.best_ce_loss - self.threshold)
 
@@ -365,7 +368,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                 self.counter += 1
                 if self.counter >= self.patience:
                     print("")
-                    print(f"[VibeVoice Smart Stop] AUTO-STOP: No improvement for {{self.patience}} FULL EPOCHS.")
+                    print(f"[VibeVoice Smart Stop] 🛑 AUTO-STOP: No improvement for {{self.patience}} FULL EPOCHS.")
                     print("")
                     control.should_training_stop = True
 
@@ -617,9 +620,8 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                     "--diffusion_loss_weight", "1.4",
                     "--ce_loss_weight", "0.04",
                     "--voice_prompt_drop_rate", "0.2",
-                    "--logging_steps", "10",
-                    "--save_strategy", "steps",
-                    "--save_steps", "200",
+                    "--logging_strategy", "epoch",
+                    "--save_strategy", "epoch",
                     "--save_total_limit", "100",  # Set to 100 so HF doesn't delete them. Our callback will do it.
                     "--remove_unused_columns", "False",
                     "--do_train"
