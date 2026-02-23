@@ -10,9 +10,22 @@ import re
 import gc
 import json
 from typing import List, Optional, Tuple, Any, Dict
+from transformers import LogitsProcessor, LogitsProcessorList
 
 # Setup logging
 logger = logging.getLogger("VibeVoice")
+
+class FirstStepDebugProcessor(LogitsProcessor):
+    def __init__(self):
+        self.step = 0
+
+    def __call__(self, input_ids, scores):
+        if self.step == 0:
+            top_scores, top_indices = torch.topk(scores[0], 3)
+            print(f"\n[DEBUG] FIRST STEP TOP-3 TOKENS: {top_indices.tolist()}")
+            # Check if the EOS token is the top prediction
+        self.step += 1
+        return scores
 
 # Import for interruption support
 try:
@@ -650,6 +663,13 @@ class BaseVibeVoiceNode:
                                 logger.info(f"Loaded {total_keys} keys from LoRA, {len(missing_keys)} keys not found in model")
 
                             logger.info("Successfully loaded state dict into module")
+
+                            # --- DEBUG: Weight Integrity Check ---
+                            for name, param in module.named_parameters():
+                                if torch.isnan(param).any() or torch.isinf(param).any():
+                                    logger.error(f"❌ [CRITICAL] NaN/Inf detected in LoRA weights for {name}!")
+                            # -------------------------------------
+
                             return True
                         except Exception as e:
                             logger.warning(f"Failed to load safetensors: {e}")
@@ -1713,6 +1733,13 @@ class BaseVibeVoiceNode:
             device = next(self.model.parameters()).device
             inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
             
+            # --- DEBUG: Tokenization Trace ---
+            if 'input_ids' in inputs:
+                input_ids = inputs['input_ids']
+                print(f"\n[DEBUG] INPUT_IDS SHAPE: {input_ids.shape}")
+                print(f"[DEBUG] FIRST 20 TOKENS: {input_ids[0][:20].tolist()}")
+            # ---------------------------------
+
             # Estimate tokens for user information (not used as limit)
             text_length = len(formatted_text.split())
             estimated_tokens = int(text_length * 2.5)  # More accurate estimate for display
@@ -1741,28 +1768,29 @@ class BaseVibeVoiceNode:
             
             # Generate with official parameters
             with torch.no_grad():
+                # --- DEBUG: Prepare Kwargs and Logits Processor ---
+                generate_kwargs = {
+                    "tokenizer": self.processor.tokenizer,
+                    "cfg_scale": cfg_scale,
+                    "max_new_tokens": None,
+                    "stop_check_fn": stop_check_fn,
+                    "logits_processor": LogitsProcessorList([FirstStepDebugProcessor()])
+                }
+
                 if use_sampling:
-                    # Use sampling mode (less stable but more varied)
-                    output = self.model.generate(
-                        **inputs,
-                        tokenizer=self.processor.tokenizer,
-                        cfg_scale=cfg_scale,
-                        max_new_tokens=None,
-                        do_sample=True,
-                        temperature=temperature,
-                        top_p=top_p,
-                        stop_check_fn=stop_check_fn,
-                    )
+                    generate_kwargs.update({
+                        "do_sample": True,
+                        "temperature": temperature,
+                        "top_p": top_p
+                    })
                 else:
-                    # Use deterministic mode like official examples
-                    output = self.model.generate(
-                        **inputs,
-                        tokenizer=self.processor.tokenizer,
-                        cfg_scale=cfg_scale,
-                        max_new_tokens=None,
-                        do_sample=False,  # More deterministic generation
-                        stop_check_fn=stop_check_fn,
-                    )
+                    generate_kwargs.update({
+                        "do_sample": False
+                    })
+
+                print(f"\n[DEBUG] GENERATION KWARGS: {json.dumps({k: str(v) for k,v in generate_kwargs.items() if k != 'tokenizer' and k != 'logits_processor'}, indent=2)}")
+
+                output = self.model.generate(**inputs, **generate_kwargs)
                 
                 # Check if we got actual audio output
                 if hasattr(output, 'speech_outputs') and output.speech_outputs:
