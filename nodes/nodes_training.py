@@ -282,6 +282,7 @@ class VibeVoice_LoRA_Trainer:
                 "early_stopping_patience": ("INT", {"default": 25, "min": 1, "max": 100, "tooltip": "Steps without improvement before stopping."}),
                 "early_stopping_threshold": ("FLOAT", {"default": 0.002, "min": 0.0001, "max": 0.1, "step": 0.001}),
                 "save_total_limit": ("INT", {"default": 3, "min": 1, "max": 10, "tooltip": "Maximum number of BEST models to keep. Worse ones will be deleted."}),
+                "validation_split": ("FLOAT", {"default": 0.15, "min": 0.0, "max": 0.5, "step": 0.05, "tooltip": "Percentage of data reserved for validation to prevent overfitting. Set to 0 to disable."}),
                 "transformers_version": ("STRING", {"default": "4.51.3", "multiline": False}), # Providing flexibility
             },
             "optional": {
@@ -302,23 +303,25 @@ class VibeVoice_LoRA_Trainer:
             output_log.append(decoded_line)
         process.stdout.close()
 
-    def _patch_early_stopping(self, repo_dir, patience, threshold, save_total_limit):
+    def _patch_early_stopping(self, repo_dir, patience, threshold, save_total_limit, validation_split):
         target_file = os.path.join(repo_dir, "src", "finetune_vibevoice_lora.py")
         if not os.path.exists(target_file):
             return False
 
-        # 1. Restore the file to its original state from git
         import subprocess
         try:
             subprocess.check_call(["git", "checkout", "--", "src/finetune_vibevoice_lora.py"], cwd=repo_dir)
-        except Exception as e:
-            print(f"[VibeVoice Patch] Warning: Could not run git checkout: {e}")
+        except Exception:
+            pass
 
-        # 2. Read the clean file
         with open(target_file, "r", encoding="utf-8") as f:
             content = f.read()
 
         import re
+
+        # --- SUPPRESS SPAMMY INTRA-EPOCH LOGS ---
+        content = re.sub(r"logger\.info\(\{.*?\}\)", "pass  # Suppressed by ComfyUI", content)
+        content = re.sub(r"print\(\{.*?\}\)", "pass  # Suppressed by ComfyUI", content)
 
         callback_code = f"""
 # --- VIBEVOICE CUSTOM CALLBACK START ---
@@ -328,54 +331,56 @@ from transformers import TrainerCallback
 
 class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
     def __init__(self, patience={patience}, threshold={threshold}, keep_best_n={save_total_limit}):
-        self.patience = patience  # Now represents EPOCHS, not micro-steps
+        self.patience = patience
         self.threshold = threshold
         self.keep_best_n = keep_best_n
         self.best_diff_loss = float('inf')
         self.best_ce_loss = float('inf')
         self.counter = 0
         self.best_checkpoints = []
-        self.last_diff_loss = None
-        self.last_ce_loss = None
-        self.last_total_loss = float('inf')
+
+        self.current_diff_loss = None
+        self.current_ce_loss = None
+        self.current_total_loss = float('inf')
 
     def on_log(self, args, state, control, logs=None, **kwargs):
-        # Only capture the latest metrics, do not evaluate here
         if logs:
-            if "train/diffusion_loss" in logs:
-                self.last_diff_loss = logs.get("train/diffusion_loss")
-            if "train/ce_loss" in logs:
-                self.last_ce_loss = logs.get("train/ce_loss")
-            if "loss" in logs:
-                self.last_total_loss = logs.get("loss")
-            elif self.last_diff_loss is not None and self.last_ce_loss is not None:
-                self.last_total_loss = self.last_diff_loss + self.last_ce_loss
+            is_eval = any(k.startswith("eval") for k in logs.keys())
+            if is_eval:
+                self.current_diff_loss = logs.get("eval/diffusion_loss", logs.get("eval_diffusion_loss", self.current_diff_loss))
+                self.current_ce_loss = logs.get("eval/ce_loss", logs.get("eval_ce_loss", self.current_ce_loss))
+                self.current_total_loss = logs.get("eval/loss", logs.get("eval_loss", self.current_total_loss))
+            else:
+                # Fallback if eval is disabled
+                self.current_diff_loss = logs.get("train/diffusion_loss", logs.get("diffusion_loss", self.current_diff_loss))
+                self.current_ce_loss = logs.get("train/ce_loss", logs.get("ce_loss", self.current_ce_loss))
+                self.current_total_loss = logs.get("loss", self.current_total_loss)
 
     def on_epoch_end(self, args, state, control, **kwargs):
-        if self.last_diff_loss is not None and self.last_ce_loss is not None:
+        if self.current_diff_loss is not None and self.current_ce_loss is not None:
             current_epoch = int(round(state.epoch or 0))
-            print("")
-            print(f"📊 [EPOCH {{current_epoch}} SUMMARY] 📝 Text Loss: {{self.last_ce_loss:.4f}} | 🎵 Audio Loss: {{self.last_diff_loss:.4f}} | 📉 Total: {{self.last_total_loss:.4f}}")
 
-            diff_improved = self.last_diff_loss < (self.best_diff_loss - self.threshold)
-            ce_improved = self.last_ce_loss < (self.best_ce_loss - self.threshold)
+            diff_improved = self.current_diff_loss < (self.best_diff_loss - self.threshold)
+            ce_improved = self.current_ce_loss < (self.best_ce_loss - self.threshold)
+
+            status = "🟢 IMPROVED" if (diff_improved or ce_improved) else "🔴 NO CHANGE"
+            print("")
+            print(f"📊 [EPOCH {{current_epoch}} VALIDATION] {{status}} | Text Loss: {{self.current_ce_loss:.4f}} | Audio Loss: {{self.current_diff_loss:.4f}} | Total: {{self.current_total_loss:.4f}}")
 
             if diff_improved or ce_improved:
-                if diff_improved: self.best_diff_loss = self.last_diff_loss
-                if ce_improved: self.best_ce_loss = self.last_ce_loss
+                if diff_improved: self.best_diff_loss = self.current_diff_loss
+                if ce_improved: self.best_ce_loss = self.current_ce_loss
                 self.counter = 0
             else:
                 self.counter += 1
                 if self.counter >= self.patience:
-                    print("")
-                    print(f"[VibeVoice Smart Stop] 🛑 AUTO-STOP: No improvement for {{self.patience}} FULL EPOCHS.")
-                    print("")
+                    print(f"\\n[VibeVoice Smart Stop] 🛑 AUTO-STOP: Validation loss stagnated for {{self.patience}} epochs.\\n")
                     control.should_training_stop = True
 
     def on_save(self, args, state, control, **kwargs):
         ckpt_dir = os.path.join(args.output_dir, f"checkpoint-{{state.global_step}}")
         if os.path.exists(ckpt_dir):
-            self.best_checkpoints.append((self.last_total_loss, ckpt_dir))
+            self.best_checkpoints.append((self.current_total_loss, ckpt_dir))
             self.best_checkpoints.sort(key=lambda x: x[0])
 
             while len(self.best_checkpoints) > self.keep_best_n:
@@ -383,59 +388,60 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                 if os.path.exists(worst_ckpt):
                     try:
                         shutil.rmtree(worst_ckpt)
-                        print(f"[VibeVoice Smart Saver] Deleted worst checkpoint: {{worst_ckpt}} (Loss: {{worst_loss:.4f}})")
+                        print(f"[VibeVoice Smart Saver] 🗑️ Deleted worse checkpoint: {{os.path.basename(worst_ckpt)}}")
                     except Exception:
                         pass
 
     def on_train_end(self, args, state, control, **kwargs):
-        if not self.best_checkpoints:
-            return
-
+        if not self.best_checkpoints: return
         best_loss, best_ckpt = self.best_checkpoints[0]
         best_lora_dir = os.path.join(best_ckpt, "lora")
         final_lora_dir = os.path.join(args.output_dir, "lora")
 
-        print("")
-        print(f"[VibeVoice Smart Saver] Training complete. Restoring BEST model from {{os.path.basename(best_ckpt)}} (Loss: {{best_loss:.4f}}) as the final output...")
-
+        print(f"\\n[VibeVoice Smart Saver] 🏆 Training complete! Restoring BEST model from {{os.path.basename(best_ckpt)}} (Val Loss: {{best_loss:.4f}})...")
         if os.path.exists(best_lora_dir):
             try:
-                if os.path.exists(final_lora_dir):
-                    shutil.rmtree(final_lora_dir)
+                if os.path.exists(final_lora_dir): shutil.rmtree(final_lora_dir)
                 shutil.copytree(best_lora_dir, final_lora_dir)
-                print("[VibeVoice Smart Saver] Best model successfully set as the final output in the main lora folder.")
-                print("")
-            except Exception as e:
-                print(f"[VibeVoice Smart Saver] Could not copy best model: {{e}}")
+                print("[VibeVoice Smart Saver] ✅ Best model set as final output.\\n")
+            except Exception:
+                pass
 # --- VIBEVOICE CUSTOM CALLBACK END ---
 """
 
-        # 3. Inject the code safely right before def main
+        # Inject callback class
         content = re.sub(r"(def main\s*\([^)]*\)\s*(->\s*None)?\s*:)", callback_code + r"\n\g<1>", content, count=1)
 
-        # 4. Safely update Trainer instantiation
-        callback_string = f"callbacks=[SmartEarlyStoppingAndSaveCallback(patience={patience}, threshold={threshold}, keep_best_n={save_total_limit})]"
+        # Build elegant injection for Evaluation Split + Trainer initialization
+        split_code = f"""
+        # --- AUTO EVAL SPLIT PATCH ---
+        import torch
+        eval_dataset = None
+        if {validation_split} > 0.0:
+            if hasattr(training_args, 'eval_strategy'): training_args.eval_strategy = "epoch"
+            if hasattr(training_args, 'evaluation_strategy'): training_args.evaluation_strategy = "epoch"
+            training_args.do_eval = True
+            try:
+                _eval_size = max(1, int(len(train_dataset) * {validation_split}))
+                _train_size = len(train_dataset) - _eval_size
+                train_dataset, eval_dataset = torch.utils.data.random_split(train_dataset, [_train_size, _eval_size], generator=torch.Generator().manual_seed(42))
+                print(f"\\n[VibeVoice Setup] 🗂️ Split dataset: {{_train_size}} for Training, {{_eval_size}} for Validation.\\n")
+            except Exception as e:
+                print(f"[VibeVoice Setup] ⚠️ Could not split dataset: {{e}}")
 
-        if "callbacks=[" in content:
-            content = re.sub(r"callbacks=\[.*?\]", callback_string, content, flags=re.DOTALL)
-        else:
-            trainer_init = "trainer = Trainer("
-            trainer_replacement = f"trainer = Trainer(\n        {callback_string},"
-            content = content.replace(trainer_init, trainer_replacement)
+        trainer = Trainer(
+            eval_dataset=eval_dataset,
+            callbacks=[SmartEarlyStoppingAndSaveCallback(patience={patience}, threshold={threshold}, keep_best_n={save_total_limit})],
+"""
 
-        # --- SUPPRESS SPAMMY INTRA-EPOCH LOGS ---
-        # 1. Neutralize manual print(logs) or logger.info(logs) inside the training loop if they exist
-        content = re.sub(r"logger\.info\(\{.*?\}\)", "pass  # Suppressed by ComfyUI", content)
-        content = re.sub(r"print\(\{.*?\}\)", "pass  # Suppressed by ComfyUI", content)
-
-        # 2. Force the Trainer's log level to standard (warnings and errors only) to stop step-by-step dicts
-        if "trainer = Trainer(" in content:
-            content = content.replace("trainer = Trainer(", "import logging\n        logging.getLogger('transformers.trainer').setLevel(logging.WARNING)\n        trainer = Trainer(")
+        # Eliminate old callbacks argument and replace Trainer init gracefully
+        content = re.sub(r"callbacks=\[.*?\]", "", content, flags=re.DOTALL)
+        content = content.replace("trainer = Trainer(", split_code)
 
         with open(target_file, "w", encoding="utf-8") as f:
             f.write(content)
 
-        print("[VibeVoice Patch] Successfully applied Epoch-based Smart Checkpointing patch.")
+        print("[VibeVoice Patch] Successfully applied Validation Split & Silenced Logs.")
         return True
 
     def _patch_flash_attention_import(self, repo_dir):
@@ -491,7 +497,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
             return True
         return False
 
-    def _setup_environment(self, repo_dir, venv_dir, transformers_version, patience, threshold, save_total_limit):
+    def _setup_environment(self, repo_dir, venv_dir, transformers_version, patience, threshold, save_total_limit, validation_split):
         """Sets up the training repository and virtual environment."""
 
         # 1. Clone Repo if missing
@@ -505,7 +511,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
 
         # Patch script
         self._patch_flash_attention_import(repo_dir)
-        self._patch_early_stopping(repo_dir, patience, threshold, save_total_limit)
+        self._patch_early_stopping(repo_dir, patience, threshold, save_total_limit, validation_split)
         self._patch_peft_task_type(repo_dir)  # <--- New PEFT patch
 
         # 2. Create Venv if missing
@@ -559,7 +565,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
     def train_lora(self, dataset_path, base_model_path, output_lora_name, batch_size,
                    gradient_accum_steps, epochs, learning_rate, mixed_precision,
                    lora_rank, lora_alpha, early_stopping_patience, early_stopping_threshold,
-                   save_total_limit, transformers_version, custom_model_path=""):
+                   save_total_limit, validation_split, transformers_version, custom_model_path=""):
 
         # Resolve model path
         model_path_to_use = base_model_path
@@ -574,7 +580,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
         venv_dir = os.path.join(current_dir, "vibevoice_venv")
 
         # Setup Environment
-        python_cmd = self._setup_environment(repo_dir, venv_dir, transformers_version, early_stopping_patience, early_stopping_threshold, save_total_limit)
+        python_cmd = self._setup_environment(repo_dir, venv_dir, transformers_version, early_stopping_patience, early_stopping_threshold, save_total_limit, validation_split)
         if not python_cmd:
             return ("Error during setup",)
 
