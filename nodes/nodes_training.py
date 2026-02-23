@@ -645,7 +645,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                     "--voice_prompt_drop_rate", "0.2",
                     "--logging_strategy", "epoch",
                     "--save_strategy", "epoch",
-                    "--save_total_limit", "100",  # Set to 100 so HF doesn't delete them. Our callback will do it.
+                    "--save_total_limit", str(save_total_limit + 5),  # Dynamic buffer above callback limit
                     "--remove_unused_columns", "False",
                     "--do_train"
                 ]
