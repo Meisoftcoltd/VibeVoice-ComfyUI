@@ -435,7 +435,8 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
 """
 
         # Eliminate old callbacks argument and replace Trainer init gracefully
-        content = re.sub(r"callbacks=\[.*?\]", "", content, flags=re.DOTALL)
+        # Use regex to consume potential trailing comma to prevent SyntaxError (e.g. ", ,")
+        content = re.sub(r"callbacks=\[.*?\],?", "", content, flags=re.DOTALL)
         content = content.replace("trainer = Trainer(", split_code)
 
         with open(target_file, "w", encoding="utf-8") as f:
