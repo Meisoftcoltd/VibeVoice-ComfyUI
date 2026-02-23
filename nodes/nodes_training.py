@@ -423,6 +423,15 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
             trainer_replacement = f"trainer = Trainer(\n        {callback_string},"
             content = content.replace(trainer_init, trainer_replacement)
 
+        # --- SUPPRESS SPAMMY INTRA-EPOCH LOGS ---
+        # 1. Neutralize manual print(logs) or logger.info(logs) inside the training loop if they exist
+        content = re.sub(r"logger\.info\(\{.*?\}\)", "pass  # Suppressed by ComfyUI", content)
+        content = re.sub(r"print\(\{.*?\}\)", "pass  # Suppressed by ComfyUI", content)
+
+        # 2. Force the Trainer's log level to standard (warnings and errors only) to stop step-by-step dicts
+        if "trainer = Trainer(" in content:
+            content = content.replace("trainer = Trainer(", "import logging\n        logging.getLogger('transformers.trainer').setLevel(logging.WARNING)\n        trainer = Trainer(")
+
         with open(target_file, "w", encoding="utf-8") as f:
             f.write(content)
 
