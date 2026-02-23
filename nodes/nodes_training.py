@@ -374,7 +374,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
             else:
                 self.counter += 1
                 if self.counter >= self.patience:
-                    print(f"\\n[VibeVoice Smart Stop] 🛑 AUTO-STOP: Validation loss stagnated for {{self.patience}} epochs.\\n")
+                    print(f"\\\\n[VibeVoice Smart Stop] 🛑 AUTO-STOP: Validation loss stagnated for {{self.patience}} epochs.\\\\n")
                     control.should_training_stop = True
 
     def on_save(self, args, state, control, **kwargs):
@@ -398,12 +398,12 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
         best_lora_dir = os.path.join(best_ckpt, "lora")
         final_lora_dir = os.path.join(args.output_dir, "lora")
 
-        print(f"\\n[VibeVoice Smart Saver] 🏆 Training complete! Restoring BEST model from {{os.path.basename(best_ckpt)}} (Val Loss: {{best_loss:.4f}})...")
+        print(f"\\\\n[VibeVoice Smart Saver] 🏆 Training complete! Restoring BEST model from {{os.path.basename(best_ckpt)}} (Val Loss: {{best_loss:.4f}})...")
         if os.path.exists(best_lora_dir):
             try:
                 if os.path.exists(final_lora_dir): shutil.rmtree(final_lora_dir)
                 shutil.copytree(best_lora_dir, final_lora_dir)
-                print("[VibeVoice Smart Saver] ✅ Best model set as final output.\\n")
+                print("[VibeVoice Smart Saver] ✅ Best model set as final output.\\\\n")
             except Exception:
                 pass
 # --- VIBEVOICE CUSTOM CALLBACK END ---
