@@ -299,6 +299,13 @@ class VibeVoice_LoRA_Trainer:
         """Lee la salida del subproceso asíncronamente y la guarda para análisis."""
         for line in iter(process.stdout.readline, b''):
             decoded_line = line.decode('utf-8', errors='replace').rstrip()
+
+            # --- SPAM FILTER ---
+            # Ignore raw dictionary logs emitted by Hugging Face
+            if decoded_line.startswith("{") and decoded_line.endswith("}"):
+                if "'epoch':" in decoded_line or "'loss':" in decoded_line or "debug/" in decoded_line:
+                    continue
+
             print(f"[VibeVoice Train] {decoded_line}")
             output_log.append(decoded_line)
         process.stdout.close()
