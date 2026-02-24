@@ -419,7 +419,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
         # Inject callback class
         content = re.sub(r"(def main\s*\([^)]*\)\s*(->\s*None)?\s*:)", callback_code + r"\n\g<1>", content, count=1)
 
-        # Build elegant injection for Evaluation Split (Left-aligned to prevent IndentationError)
+        #  Build elegant injection for Evaluation Split (Left-aligned to prevent IndentationError)
         split_code = f"""    # --- AUTO EVAL SPLIT PATCH ---
     import torch
     eval_dataset = None
