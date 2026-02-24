@@ -296,38 +296,46 @@ class VibeVoice_LoRA_Trainer:
     CATEGORY = "VibeVoice/Training"
 
     def _read_subprocess_output(self, process, output_log):
-        """Reads subprocess output, filters spam, and keeps tqdm bar at the bottom."""
         import sys
+        last_was_progress = False
+
         for line in iter(process.stdout.readline, b''):
-            # tqdm often uses \r internally. Split by \r and take the last part to get the freshest update
+            # Split by \r to handle tqdm's carriage returns properly
             parts = line.decode('utf-8', errors='replace').split('\r')
             decoded_line = parts[-1].rstrip('\n')
 
+            check_line = decoded_line.strip()
+
             # --- SUPER SPAM FILTER ---
-            if "{'" in decoded_line and "':" in decoded_line and "}" in decoded_line:
+            if "{'" in check_line and "':" in check_line and "}" in check_line:
                 continue
-            if "UserWarning: Could not find a config file" in decoded_line or "warnings.warn(" in decoded_line:
+            if "UserWarning: Could not find a config file" in check_line or "warnings.warn(" in check_line:
                 continue
-            if not decoded_line.strip() or decoded_line.strip() == "[VibeVoice Train]":
+            if not check_line or check_line == "[VibeVoice Train]":
                 continue
 
-            # --- DYNAMIC CONSOLE LOGIC (Sticky tqdm) ---
-            # Detect if the line is a tqdm progress bar
-            is_progress_bar = "%|" in decoded_line and ("it/s]" in decoded_line or "s/it]" in decoded_line or "00:" in decoded_line)
+            # Detect if the line is a tqdm progress bar (including tiny eval bars)
+            is_progress_bar = "%|" in check_line and ("it/s]" in check_line or "s/it]" in check_line or "00:" in check_line)
 
             if is_progress_bar:
-                # \r returns to line start, \033[K clears the line. NO newline (\n) at the end!
-                sys.stdout.write(f"\r\033[K[VibeVoice Train] {decoded_line.strip()}")
+                # Draw the progress bar at the start of the current line
+                sys.stdout.write(f"\r[VibeVoice Train] {check_line}")
                 sys.stdout.flush()
+                last_was_progress = True
             else:
-                # Normal text: clear the current line (where tqdm might be), print text WITH newline
-                sys.stdout.write(f"\r\033[K[VibeVoice Train] {decoded_line.strip()}\n")
+                log_str = f"[VibeVoice Train] {check_line}"
+                if last_was_progress:
+                    # Overwrite the old progress bar with spaces, print log, and drop to next line
+                    sys.stdout.write(f"\r{log_str.ljust(120)}\n")
+                else:
+                    sys.stdout.write(f"{log_str}\n")
+
                 sys.stdout.flush()
-                output_log.append(decoded_line.strip())
+                output_log.append(check_line)
+                last_was_progress = False
 
         process.stdout.close()
-        # Print a final newline when training ends so the terminal prompt doesn't stick to the bar
-        print("")
+        print("") # Final newline
 
     def _patch_early_stopping(self, repo_dir, patience, threshold, save_total_limit, validation_split):
         target_file = os.path.join(repo_dir, "src", "finetune_vibevoice_lora.py")
