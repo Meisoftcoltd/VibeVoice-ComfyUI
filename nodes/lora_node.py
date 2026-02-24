@@ -15,57 +15,44 @@ _lora_cache = {
 }
 
 def get_available_loras() -> List[str]:
-    """Get list of available LoRA folders in ComfyUI/models/vibevoice/loras"""
+    """Get list of available LoRA folders in ComfyUI/models/vibevoice/loras recursively"""
     try:
         import folder_paths
 
         # Get the ComfyUI models directory
         models_dir = folder_paths.get_folder_paths("checkpoints")[0]
-        # Navigate to vibevoice/loras directory
         loras_dir = os.path.join(os.path.dirname(models_dir), "vibevoice", "loras")
 
-        # Create directory if it doesn't exist
         os.makedirs(loras_dir, exist_ok=True)
 
-        # List all directories in the loras folder
         lora_folders = []
         if os.path.exists(loras_dir):
-            for item in os.listdir(loras_dir):
-                item_path = os.path.join(loras_dir, item)
-                if os.path.isdir(item_path):
-                    # Check if it contains LoRA files directly
-                    has_direct = (
-                        os.path.exists(os.path.join(item_path, "adapter_config.json")) or
-                        os.path.exists(os.path.join(item_path, "adapter_model.safetensors")) or
-                        os.path.exists(os.path.join(item_path, "adapter_model.bin"))
-                    )
+            # Deep scan all subdirectories
+            for root, dirs, files in os.walk(loras_dir):
+                has_config = "adapter_config.json" in files
+                has_model = "adapter_model.safetensors" in files or "adapter_model.bin" in files
 
-                    # Check if it contains LoRA files in a 'lora' subfolder (from auto-trainer)
-                    has_subfolder = (
-                        os.path.exists(os.path.join(item_path, "lora", "adapter_config.json")) or
-                        os.path.exists(os.path.join(item_path, "lora", "adapter_model.safetensors")) or
-                        os.path.exists(os.path.join(item_path, "lora", "adapter_model.bin"))
-                    )
+                if has_config and has_model:
+                    # Get path relative to the loras base directory
+                    rel_path = os.path.relpath(root, loras_dir)
+                    # Normalize slashes for the UI dropdown
+                    rel_path = rel_path.replace("\\", "/")
+                    lora_folders.append(rel_path)
 
-                    if has_direct or has_subfolder:
-                        lora_folders.append(item)
-
-        # Only log on first scan to avoid spam
-        if not _lora_cache["first_load_logged"]:
-            if not lora_folders:
-                logger.info("No LoRA adapters found in ComfyUI/models/vibevoice/loras")
-            _lora_cache["first_load_logged"] = True
-
-        # Always include "None" option to disable LoRA
         if not lora_folders:
-            return ["None"]
+            lora_folders = ["None"]
+        else:
+            # Sort alphabetically to keep checkpoints organized, then prepend "None"
+            lora_folders.sort()
+            lora_folders.insert(0, "None")
 
-        # Sort alphabetically and add None option at the beginning
-        lora_folders.sort()
-        return ["None"] + lora_folders
+        return lora_folders
 
+    except ImportError:
+        logger.error("Could not import folder_paths from ComfyUI")
+        return ["None"]
     except Exception as e:
-        logger.error(f"Error listing LoRA folders: {e}")
+        logger.error(f"Error listing LoRAs: {e}")
         return ["None"]
 
 class VibeVoiceLoRANode:
@@ -117,79 +104,53 @@ class VibeVoiceLoRANode:
     CATEGORY = "VibeVoiceWrapper"
     DESCRIPTION = "Configure LoRA adapters for fine-tuned VibeVoice models. Place LoRA folders in ComfyUI/models/vibevoice/loras/"
 
-    def configure_lora(self, lora_name: str = "None", llm_strength: float = 1.0,
-                      use_llm: bool = True, use_diffusion_head: bool = True,
-                      use_acoustic_connector: bool = True, use_semantic_connector: bool = True):
-        """Configure LoRA settings and validate the path"""
-
-        # Handle "None" selection
+    def configure_lora(self, lora_name: str, llm_strength: float, use_llm: bool,
+                       use_diffusion_head: bool, use_acoustic_connector: bool,
+                       use_semantic_connector: bool) -> tuple:
         if lora_name == "None":
-            logger.info("No LoRA selected, using base model")
-            return ({
-                "path": None,
-                "llm_strength": llm_strength,
-                "use_llm": use_llm,
-                "use_diffusion_head": use_diffusion_head,
-                "use_acoustic_connector": use_acoustic_connector,
-                "use_semantic_connector": use_semantic_connector
-            },)
+            if not _lora_cache.get("first_load_logged"):
+                logger.info("No LoRA selected")
+                _lora_cache["first_load_logged"] = True
+            return (None,)
 
         try:
             import folder_paths
-
-            # Build full path to the LoRA folder
             models_dir = folder_paths.get_folder_paths("checkpoints")[0]
             loras_dir = os.path.join(os.path.dirname(models_dir), "vibevoice", "loras")
-            lora_path = os.path.join(loras_dir, lora_name)
 
-            # Validate the path exists
-            if not os.path.exists(lora_path):
-                logger.error(f"LoRA path does not exist: {lora_path}")
-                raise Exception(f"LoRA folder not found: {lora_name}")
+            # Since lora_name is now the exact relative path, we just join it safely
+            lora_path = os.path.normpath(os.path.join(loras_dir, lora_name))
 
             if not os.path.isdir(lora_path):
                 logger.error(f"LoRA path is not a directory: {lora_path}")
                 raise Exception(f"LoRA path must be a directory: {lora_name}")
 
-            # Smart Subfolder Detection:
-            # If the config is not in the root, but inside a "lora" subdirectory, adjust the path
-            if not os.path.exists(os.path.join(lora_path, "adapter_config.json")):
-                sub_path = os.path.join(lora_path, "lora")
-                if os.path.exists(os.path.join(sub_path, "adapter_config.json")):
-                    logger.info(f"Auto-detected nested LoRA files in {sub_path}")
-                    lora_path = sub_path
-
-            # Check for required files (using the potentially adjusted lora_path)
+            # Check for required files directly in the selected path
             adapter_config = os.path.join(lora_path, "adapter_config.json")
             adapter_model_st = os.path.join(lora_path, "adapter_model.safetensors")
             adapter_model_bin = os.path.join(lora_path, "adapter_model.bin")
 
             if not os.path.exists(adapter_config):
-                logger.warning(f"adapter_config.json not found in {lora_name}")
+                raise Exception(f"adapter_config.json not found in {lora_path}")
+            if not (os.path.exists(adapter_model_st) or os.path.exists(adapter_model_bin)):
+                raise Exception(f"No adapter_model found in {lora_path}")
 
-            if not os.path.exists(adapter_model_st) and not os.path.exists(adapter_model_bin):
-                logger.warning(f"No adapter model file found in {lora_name}")
-                logger.warning("Expected: adapter_model.safetensors or adapter_model.bin")
+            logger.info(f"LoRA configured: {os.path.basename(lora_path)} ({lora_path})")
 
-            logger.info(f"LoRA configured: {lora_name} ({lora_path})")
+            # Check for additional components inside the selected folder
+            diffusion_head = os.path.join(lora_path, "diffusion_head")
+            acoustic_connector = os.path.join(lora_path, "acoustic_connector")
+            semantic_connector = os.path.join(lora_path, "semantic_connector")
 
-            # Check for optional components
-            components_found = []
-            diffusion_head_path = os.path.join(lora_path, "diffusion_head")
-            acoustic_connector_path = os.path.join(lora_path, "acoustic_connector")
-            semantic_connector_path = os.path.join(lora_path, "semantic_connector")
+            additional_components = []
+            if os.path.exists(diffusion_head): additional_components.append("diffusion_head")
+            if os.path.exists(acoustic_connector): additional_components.append("acoustic_connector")
+            if os.path.exists(semantic_connector): additional_components.append("semantic_connector")
 
-            if os.path.exists(diffusion_head_path):
-                components_found.append("diffusion_head")
-            if os.path.exists(acoustic_connector_path):
-                components_found.append("acoustic_connector")
-            if os.path.exists(semantic_connector_path):
-                components_found.append("semantic_connector")
+            if additional_components:
+                logger.info(f"Additional LoRA components found: {', '.join(additional_components)}")
 
-            if components_found:
-                logger.info(f"Additional LoRA components found: {', '.join(components_found)}")
-
-            # Create configuration dictionary
+            # Create the configuration dictionary
             lora_config = {
                 "path": lora_path,
                 "llm_strength": llm_strength,
