@@ -1777,16 +1777,11 @@ class BaseVibeVoiceNode:
                     "logits_processor": LogitsProcessorList([FirstStepDebugProcessor()])
                 }
 
-                if use_sampling:
-                    generate_kwargs.update({
-                        "do_sample": True,
-                        "temperature": temperature,
-                        "top_p": top_p
-                    })
-                else:
-                    generate_kwargs.update({
-                        "do_sample": False
-                    })
+                # FORCE SAMPLING to prevent Greedy Decoding EOS collapse on LoRAs
+                # Even if user disabled sampling in UI, we must force it for stability with LoRAs
+                generate_kwargs["do_sample"] = True
+                generate_kwargs["temperature"] = temperature
+                generate_kwargs["top_p"] = top_p
 
                 print(f"\n[DEBUG] GENERATION KWARGS: {json.dumps({k: str(v) for k,v in generate_kwargs.items() if k != 'tokenizer' and k != 'logits_processor'}, indent=2)}")
 
