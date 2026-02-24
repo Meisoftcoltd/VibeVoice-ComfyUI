@@ -296,26 +296,38 @@ class VibeVoice_LoRA_Trainer:
     CATEGORY = "VibeVoice/Training"
 
     def _read_subprocess_output(self, process, output_log):
-        """Lee la salida del subproceso asíncronamente y la guarda para análisis."""
+        """Reads subprocess output, filters spam, and keeps tqdm bar at the bottom."""
+        import sys
         for line in iter(process.stdout.readline, b''):
-            decoded_line = line.decode('utf-8', errors='replace').rstrip()
+            # tqdm often uses \r internally. Split by \r and take the last part to get the freshest update
+            parts = line.decode('utf-8', errors='replace').split('\r')
+            decoded_line = parts[-1].rstrip('\n')
 
             # --- SUPER SPAM FILTER ---
-            # 1. Hide HF dictionary logs even if attached to a tqdm progress bar
             if "{'" in decoded_line and "':" in decoded_line and "}" in decoded_line:
                 continue
-
-            # 2. Hide annoying and harmless PEFT vocabulary warnings
             if "UserWarning: Could not find a config file" in decoded_line or "warnings.warn(" in decoded_line:
                 continue
-
-            # 3. Hide completely empty lines
             if not decoded_line.strip() or decoded_line.strip() == "[VibeVoice Train]":
                 continue
 
-            print(f"[VibeVoice Train] {decoded_line}")
-            output_log.append(decoded_line)
+            # --- DYNAMIC CONSOLE LOGIC (Sticky tqdm) ---
+            # Detect if the line is a tqdm progress bar
+            is_progress_bar = "%|" in decoded_line and ("it/s]" in decoded_line or "s/it]" in decoded_line or "00:" in decoded_line)
+
+            if is_progress_bar:
+                # \r returns to line start, \033[K clears the line. NO newline (\n) at the end!
+                sys.stdout.write(f"\r\033[K[VibeVoice Train] {decoded_line.strip()}")
+                sys.stdout.flush()
+            else:
+                # Normal text: clear the current line (where tqdm might be), print text WITH newline
+                sys.stdout.write(f"\r\033[K[VibeVoice Train] {decoded_line.strip()}\n")
+                sys.stdout.flush()
+                output_log.append(decoded_line.strip())
+
         process.stdout.close()
+        # Print a final newline when training ends so the terminal prompt doesn't stick to the bar
+        print("")
 
     def _patch_early_stopping(self, repo_dir, patience, threshold, save_total_limit, validation_split):
         target_file = os.path.join(repo_dir, "src", "finetune_vibevoice_lora.py")
