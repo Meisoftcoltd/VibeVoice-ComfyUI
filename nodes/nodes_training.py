@@ -420,6 +420,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
         content = re.sub(r"(def main\s*\([^)]*\)\s*(->\s*None)?\s*:)", callback_code + r"\n\g<1>", content, count=1)
 
         #  Build elegant injection for Evaluation Split (Left-aligned to prevent IndentationError)
+        # Build elegant injection for Evaluation Split (Left-aligned to prevent IndentationError)
         split_code = f"""    # --- AUTO EVAL SPLIT PATCH ---
     import torch
     eval_dataset = None
@@ -435,8 +436,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
         except Exception as e:
             print(f"[VibeVoice Setup] ⚠️ Could not split dataset: {{e}}")
 
-    trainer = VibeVoiceTrainer(
-        eval_dataset=eval_dataset,"""
+    trainer = VibeVoiceTrainer("""
 
         # 1. Replace the VibeVoiceTrainer initialization
         # Ensure we are replacing the exact 4-space indented original line
