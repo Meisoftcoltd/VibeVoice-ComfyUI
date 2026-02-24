@@ -419,7 +419,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
         # Inject callback class
         content = re.sub(r"(def main\s*\([^)]*\)\s*(->\s*None)?\s*:)", callback_code + r"\n\g<1>", content, count=1)
 
-        # Build elegant injection for Evaluation Split + Trainer initialization
+        # Build elegant injection for Evaluation Split
         split_code = f"""
         # --- AUTO EVAL SPLIT PATCH ---
         import torch
@@ -436,20 +436,21 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
             except Exception as e:
                 print(f"[VibeVoice Setup] ⚠️ Could not split dataset: {{e}}")
 
-        trainer = Trainer(
+        trainer = VibeVoiceTrainer(
             eval_dataset=eval_dataset,
-            callbacks=[SmartEarlyStoppingAndSaveCallback(patience={patience}, threshold={threshold}, keep_best_n={save_total_limit})],
 """
 
-        # Eliminate old callbacks argument and replace Trainer init gracefully
-        # Use regex to consume potential trailing comma to prevent SyntaxError (e.g. ", ,")
-        content = re.sub(r"callbacks=\[.*?\],?", "", content, flags=re.DOTALL)
-        content = content.replace("trainer = Trainer(", split_code)
+        # 1. Replace the VibeVoiceTrainer initialization
+        content = content.replace("trainer = VibeVoiceTrainer(", split_code)
+
+        # 2. Inject our callback into the existing list to PRESERVE the EmaCallback
+        my_callback = f"SmartEarlyStoppingAndSaveCallback(patience={patience}, threshold={threshold}, keep_best_n={save_total_limit}), "
+        content = content.replace("callbacks=[", f"callbacks=[{my_callback}", 1)
 
         with open(target_file, "w", encoding="utf-8") as f:
             f.write(content)
 
-        print("[VibeVoice Patch] Successfully applied Validation Split & Silenced Logs.")
+        print("[VibeVoice Patch] Successfully applied Validation Split and PRESERVED EmaCallback.")
         return True
 
     def _patch_flash_attention_import(self, repo_dir):
