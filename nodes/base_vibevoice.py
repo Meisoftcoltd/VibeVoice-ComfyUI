@@ -577,9 +577,11 @@ class BaseVibeVoiceNode:
             )
     
     def _apply_lora(self, lora_path: str):
-        """Apply LoRA adapters to the model"""
+        """Apply LoRA adapters to the model - Official Refactor"""
         try:
             logger.info(f"Starting LoRA application from path: {lora_path}")
+            from peft import PeftModel
+            from safetensors.torch import load_file
 
             # Check component flags
             use_llm = getattr(self, 'use_llm_lora', True)
@@ -589,221 +591,86 @@ class BaseVibeVoiceNode:
 
             logger.info(f"LoRA component flags - LLM: {use_llm}, Diffusion: {use_diffusion}, Acoustic: {use_acoustic}, Semantic: {use_semantic}")
 
-            if not any([use_llm, use_diffusion, use_acoustic, use_semantic]):
-                logger.info("All LoRA components disabled, skipping LoRA application")
-                return
-
-            # Apply LLM LoRA adapter if requested
+            # 1. Apply LLM LoRA via PEFT (Official Method)
             if use_llm:
-                # Check if adapter files exist
-                adapter_model_path = os.path.join(lora_path, "adapter_model.safetensors")
-                adapter_bin_path = os.path.join(lora_path, "adapter_model.bin")
-                adapter_config = os.path.join(lora_path, "adapter_config.json")
-
-                has_adapter = os.path.exists(adapter_model_path) or os.path.exists(adapter_bin_path)
-
-                if has_adapter and os.path.exists(adapter_config):
-                    try:
-                        from peft import PeftModel
-                        base_lm = getattr(self.model.model, 'language_model', None)
-                        if base_lm is not None:
-                            logger.info(f"Applying LLM LoRA adapter from: {lora_path}")
-                            lora_wrapped = PeftModel.from_pretrained(base_lm, lora_path, is_trainable=False)
-                            device = next(self.model.parameters()).device
-                            dtype = next(self.model.parameters()).dtype
-                            lora_wrapped = lora_wrapped.to(device=device, dtype=dtype)
-                            self.model.model.language_model = lora_wrapped
-                            logger.info("LLM LoRA adapter successfully applied")
-                    except ImportError:
-                        logger.warning("PEFT library not available for LLM LoRA")
-                    except Exception as e:
-                        logger.warning(f"Failed to apply LLM LoRA: {e}")
-                else:
-                    logger.info(f"No LLM LoRA adapter files found in {lora_path}, skipping LLM LoRA")
-
-            # Helper function to load state dict into module
-            def _load_state_dict_into(module, folder):
-                if module is None:
-                    logger.warning(f"Module is None, cannot load state dict from {folder}")
-                    return False
-                if not os.path.isdir(folder):
-                    logger.warning(f"Folder does not exist: {folder}")
-                    return False
-
+                logger.info(f"[VibeVoice] Applying LLM LoRA via PEFT from {lora_path}")
                 try:
-                    # Try safetensors first
-                    safetensor_path = os.path.join(folder, "model.safetensors")
-                    if os.path.exists(safetensor_path):
-                        try:
-                            import safetensors.torch as st
-                            logger.info(f"Loading safetensor from: {safetensor_path}")
-                            state_dict = st.load_file(safetensor_path)
-                            logger.info(f"Loaded state dict with {len(state_dict)} keys")
-
-                            # Get device and dtype from module
-                            device = next(module.parameters()).device
-                            dtype = next(module.parameters()).dtype
-                            logger.info(f"Module device: {device}, dtype: {dtype}")
-
-                            # Convert state dict to correct device and dtype
-                            for key in state_dict:
-                                state_dict[key] = state_dict[key].to(device=device, dtype=dtype)
-
-                            # Load with strict=False to allow partial loading
-                            missing_keys, unexpected_keys = module.load_state_dict(state_dict, strict=False)
-
-                            if missing_keys:
-                                logger.warning(f"Missing keys when loading state dict ({len(missing_keys)} total): {missing_keys[:5]}..." if len(missing_keys) > 5 else f"Missing keys: {missing_keys}")
-                            if unexpected_keys:
-                                logger.warning(f"Unexpected keys when loading state dict ({len(unexpected_keys)} total): {unexpected_keys[:5]}..." if len(unexpected_keys) > 5 else f"Unexpected keys: {unexpected_keys}")
-
-                            # Log success even with missing keys if most were loaded
-                            total_keys = len(state_dict)
-                            if missing_keys:
-                                logger.info(f"Loaded {total_keys} keys from LoRA, {len(missing_keys)} keys not found in model")
-
-                            logger.info("Successfully loaded state dict into module")
-
-                            # --- DEBUG: Weight Integrity Check ---
-                            for name, param in module.named_parameters():
-                                if torch.isnan(param).any() or torch.isinf(param).any():
-                                    logger.error(f"❌ [CRITICAL] NaN/Inf detected in LoRA weights for {name}!")
-                            # -------------------------------------
-
-                            return True
-                        except Exception as e:
-                            logger.warning(f"Failed to load safetensors: {e}")
-                            import traceback
-                            logger.debug(f"Traceback: {traceback.format_exc()}")
-
-                    # Fallback to PyTorch format
-                    pytorch_path = os.path.join(folder, "pytorch_model.bin")
-                    if os.path.exists(pytorch_path):
-                        logger.info(f"Loading pytorch model from: {pytorch_path}")
-                        state_dict = torch.load(pytorch_path, map_location="cpu")
-                        logger.info(f"Loaded state dict with {len(state_dict)} keys")
-
-                        # Get device and dtype from module
-                        device = next(module.parameters()).device
-                        dtype = next(module.parameters()).dtype
-
-                        # Convert state dict to correct device and dtype
-                        for key in state_dict:
-                            state_dict[key] = state_dict[key].to(device=device, dtype=dtype)
-
-                        missing_keys, unexpected_keys = module.load_state_dict(state_dict, strict=False)
-
-                        if missing_keys:
-                            logger.warning(f"Missing keys: {missing_keys[:5]}..." if len(missing_keys) > 5 else f"Missing keys: {missing_keys}")
-                        if unexpected_keys:
-                            logger.warning(f"Unexpected keys: {unexpected_keys[:5]}..." if len(unexpected_keys) > 5 else f"Unexpected keys: {unexpected_keys}")
-
-                        logger.info("Successfully loaded pytorch model into module")
-                        return True
-                    else:
-                        logger.warning(f"No model file found in {folder}")
-                        logger.warning(f"Looked for: {safetensor_path} and {pytorch_path}")
-
+                    # Apply to self.model.model.language_model as per documentation
+                    self.model.model.language_model = PeftModel.from_pretrained(
+                        self.model.model.language_model,
+                        lora_path
+                    )
+                    logger.info("LLM LoRA adapter successfully applied via PEFT")
                 except Exception as e:
-                    logger.error(f"Failed to load state dict from {folder}: {e}")
-                    import traceback
-                    logger.error(f"Traceback: {traceback.format_exc()}")
-                return False
+                    logger.error(f"Failed to apply LLM LoRA via PEFT: {e}")
 
-            # Load diffusion head if requested
+            # Helper to load state dict safely
+            def load_component_weights(module, state_dict):
+                try:
+                    # Ensure dtype match
+                    dtype = next(module.parameters()).dtype
+                    device = next(module.parameters()).device
+
+                    # Cast state_dict
+                    for k, v in state_dict.items():
+                        state_dict[k] = v.to(device=device, dtype=dtype)
+
+                    module.load_state_dict(state_dict)
+
+                    # Weight Integrity Check
+                    for name, param in module.named_parameters():
+                        if torch.isnan(param).any() or torch.isinf(param).any():
+                            logger.error(f"❌ [CRITICAL] NaN/Inf detected in weights for {name}!")
+
+                    return True
+                except Exception as e:
+                    logger.error(f"Failed to load weights: {e}")
+                    return False
+
+            # 2. Diffusion Head (prediction_head)
             if use_diffusion:
-                diffusion_path = os.path.join(lora_path, "diffusion_head")
-                if os.path.exists(diffusion_path):
-                    logger.info(f"Found diffusion_head directory at: {diffusion_path}")
+                head_dir = os.path.join(lora_path, "diffusion_head")
+                state_dict = None
+                if os.path.exists(head_dir):
+                    sf_path = os.path.join(head_dir, "model.safetensors")
+                    bin_path = os.path.join(head_dir, "diffusion_head_full.bin") # As per docs
 
-                    # The diffusion head is called 'prediction_head' in VibeVoice
-                    module = getattr(self.model.model, 'prediction_head', None)
-                    if module:
-                        logger.info("Found prediction_head module in model")
+                    if os.path.exists(sf_path):
+                        logger.info(f"Loading Diffusion Head from {sf_path}")
+                        state_dict = load_file(sf_path)
+                    elif os.path.exists(bin_path):
+                        logger.info(f"Loading Diffusion Head from {bin_path}")
+                        state_dict = torch.load(bin_path, map_location="cpu")
 
-                        # Check model compatibility by looking at dimensions
-                        skip_loading = False
-                        try:
-                            # Get hidden size from the module
-                            if hasattr(module, 'cond_proj') and hasattr(module.cond_proj, 'weight'):
-                                model_hidden_size = module.cond_proj.weight.shape[0]
-                                logger.info(f"Current model prediction_head hidden size: {model_hidden_size}")
+                    if state_dict is not None:
+                        if load_component_weights(self.model.model.prediction_head, state_dict):
+                            logger.info("[VibeVoice] Diffusion Head loaded")
 
-                                # Check LoRA dimensions
-                                safetensor_path = os.path.join(diffusion_path, "model.safetensors")
-                                if os.path.exists(safetensor_path):
-                                    import safetensors.torch as st
-                                    lora_state = st.load_file(safetensor_path)
-                                    if 'cond_proj.weight' in lora_state:
-                                        lora_hidden_size = lora_state['cond_proj.weight'].shape[0]
-                                        logger.info(f"LoRA diffusion head hidden size: {lora_hidden_size}")
-
-                                        if model_hidden_size != lora_hidden_size:
-                                            skip_loading = True
-                                            if lora_hidden_size == 3584:
-                                                logger.error("="*60)
-                                                logger.error("LoRA MODEL MISMATCH!")
-                                                logger.error(f"This LoRA was trained on VibeVoice-Large (hidden_size=3584)")
-                                                if model_hidden_size == 1536:
-                                                    logger.error(f"You are using VibeVoice-1.5B (hidden_size=1536)")
-                                                    logger.error("Please switch to 'VibeVoice-Large' model to use this LoRA")
-                                                else:
-                                                    logger.error(f"Your model has hidden_size={model_hidden_size}")
-                                                    logger.error("Please use VibeVoice-Large (non-quantized) model")
-                                                logger.error("="*60)
-                                                logger.error("Skipping LoRA loading due to incompatible model")
-                                            elif lora_hidden_size == 1536:
-                                                logger.error("="*60)
-                                                logger.error("LoRA MODEL MISMATCH!")
-                                                logger.error(f"This LoRA was trained on VibeVoice-1.5B (hidden_size=1536)")
-                                                logger.error(f"You are using a model with hidden_size={model_hidden_size}")
-                                                logger.error("Please switch to 'VibeVoice-1.5B' model to use this LoRA")
-                                                logger.error("="*60)
-                                                logger.error("Skipping LoRA loading due to incompatible model")
-                        except Exception as e:
-                            logger.debug(f"Could not check model compatibility: {e}")
-
-                        # Only attempt to load if compatible
-                        if not skip_loading:
-                            if _load_state_dict_into(module, diffusion_path):
-                                logger.info("Diffusion head LoRA loaded successfully into prediction_head")
-                            else:
-                                logger.warning("Failed to load diffusion head LoRA")
-                        else:
-                            logger.info("Diffusion head LoRA loading skipped due to model mismatch")
-                    else:
-                        logger.warning("Model does not have prediction_head attribute")
-                        # Debug: list available attributes
-                        attrs = [a for a in dir(self.model.model) if not a.startswith('_')]
-                        logger.debug(f"Available model.model attributes: {attrs[:15]}...")
-                else:
-                    logger.info(f"No diffusion_head directory found at: {diffusion_path}")
-
-            # Load acoustic connector if requested
+            # 3. Acoustic Connector
             if use_acoustic:
-                acoustic_path = os.path.join(lora_path, "acoustic_connector")
-                if os.path.exists(acoustic_path):
-                    module = getattr(self.model.model, 'acoustic_connector', None)
-                    if module and _load_state_dict_into(module, acoustic_path):
-                        logger.info("Acoustic connector LoRA loaded")
+                # Check for standard pytorch_model.bin or subfolder structure
+                ac_path = os.path.join(lora_path, "acoustic_connector", "pytorch_model.bin")
+                if os.path.exists(ac_path):
+                    logger.info(f"Loading Acoustic Connector from {ac_path}")
+                    state_dict = torch.load(ac_path, map_location="cpu")
+                    if load_component_weights(self.model.model.acoustic_connector, state_dict):
+                        logger.info("[VibeVoice] Acoustic Connector loaded")
 
-            # Load semantic connector if requested
+            # 4. Semantic Connector
             if use_semantic:
-                semantic_path = os.path.join(lora_path, "semantic_connector")
-                if os.path.exists(semantic_path):
-                    module = getattr(self.model.model, 'semantic_connector', None)
-                    if module and _load_state_dict_into(module, semantic_path):
-                        logger.info("Semantic connector LoRA loaded")
+                se_path = os.path.join(lora_path, "semantic_connector", "pytorch_model.bin")
+                if os.path.exists(se_path):
+                    logger.info(f"Loading Semantic Connector from {se_path}")
+                    state_dict = torch.load(se_path, map_location="cpu")
+                    if load_component_weights(self.model.model.semantic_connector, state_dict):
+                        logger.info("[VibeVoice] Semantic Connector loaded")
 
-
-            # Log summary of what was loaded
             logger.info("LoRA application completed")
 
         except Exception as e:
             logger.error(f"Error applying LoRA: {e}")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
-            # Don't fail the entire load, just log the error
 
     def _verify_quantization(self, expected_mode: str):
         """Verify that quantization was actually applied correctly"""
@@ -1031,130 +898,13 @@ class BaseVibeVoiceNode:
                 model_kwargs = {
                     "cache_dir": comfyui_models_dir,
                     "trust_remote_code": True,
-                    "torch_dtype": torch.bfloat16,
+                    "torch_dtype": torch.bfloat16, # FORCE BFLOAT16
                     "device_map": get_device_map(),
                 }
                 
-                # Handle quantized model loading
-                if is_quantized_4bit or is_quantized_8bit:
-                    # Check if CUDA is available (required for quantization)
-                    if not torch.cuda.is_available():
-                        raise Exception("Quantized models require a CUDA GPU. Please use standard models on CPU/MPS.")
-
-                    # Try to import bitsandbytes
-                    try:
-                        from transformers import BitsAndBytesConfig
-
-                        if is_quantized_4bit:
-                            logger.info("Loading 4-bit quantized model with bitsandbytes...")
-                            # Configure 4-bit quantization
-                            bnb_config = BitsAndBytesConfig(
-                                load_in_4bit=True,
-                                bnb_4bit_compute_dtype=torch.bfloat16,
-                                bnb_4bit_use_double_quant=True,
-                                bnb_4bit_quant_type='nf4'
-                            )
-                            if use_4bit_subfolder:
-                                model_kwargs["subfolder"] = "4bit"
-                                logger.info("Using subfolder='4bit' for loading")
-                        else:  # 8-bit
-                            logger.info("Loading 8-bit quantized model with bitsandbytes...")
-                            # Configure 8-bit quantization
-                            bnb_config = BitsAndBytesConfig(
-                                load_in_8bit=True,
-                                bnb_8bit_compute_dtype=torch.bfloat16
-                            )
-
-                        model_kwargs["quantization_config"] = bnb_config
-                        model_kwargs["device_map"] = "cuda"  # Force CUDA for quantized models
-
-                    except ImportError:
-                        raise Exception(
-                            "Quantized models require 'bitsandbytes' library.\n"
-                            "Please install it with: pip install bitsandbytes\n"
-                            "Or use the standard VibeVoice models instead."
-                        )
-
-                # Handle LLM-only 8-bit quantization (for non-quantized models) - EXPERIMENTAL
-                elif quantize_llm == "8bit" and not is_quantized:
-                    # Check if CUDA is available (required for quantization)
-                    if not torch.cuda.is_available():
-                        raise Exception("LLM quantization requires a CUDA GPU. Please use 'full precision' on CPU/MPS.")
-
-                    # Try to import bitsandbytes
-                    try:
-                        from transformers import BitsAndBytesConfig
-
-                        logger.info("Quantizing LLM component to 8-bit...")
-                        # Configure 8-bit quantization for LLM only
-                        # CRITICAL: Must skip all audio-related components to prevent noise
-                        bnb_config = BitsAndBytesConfig(
-                            load_in_8bit=True,
-                            bnb_8bit_compute_dtype=torch.bfloat16,
-                            # Skip ALL audio-critical components (same as 4bit + more conservative)
-                            llm_int8_skip_modules=[
-                                "lm_head",              # Output projection
-                                "prediction_head",      # Diffusion head - CRITICAL for audio quality
-                                "acoustic_connector",   # Audio->LLM projection - CRITICAL
-                                "semantic_connector",   # Semantic->LLM projection - CRITICAL
-                                "acoustic_tokenizer",   # VAE encoder/decoder for audio
-                                "semantic_tokenizer",   # VAE encoder for semantics
-                            ],
-                            # Ultra-conservative outlier threshold (lower = more fp16 processing)
-                            # Default is 6.0, but audio/diffusion models need 3.0-4.0 for stability
-                            llm_int8_threshold=3.0,
-                            # Disable fp16 weights (use int8 storage)
-                            llm_int8_has_fp16_weight=False,
-                        )
-
-                        model_kwargs["quantization_config"] = bnb_config
-                        model_kwargs["device_map"] = "auto"
-
-                        # Flag for post-load verification
-                        model_kwargs["_quantization_mode"] = "8bit"
-
-                    except ImportError:
-                        raise Exception(
-                            "LLM quantization requires 'bitsandbytes' library.\n"
-                            "Please install it with: pip install bitsandbytes\n"
-                            "Or use 'full precision' mode instead."
-                        )
-
-                # Handle LLM-only 4-bit quantization (for non-quantized models)
-                elif quantize_llm == "4bit" and not is_quantized:
-                    # Check if CUDA is available (required for quantization)
-                    if not torch.cuda.is_available():
-                        raise Exception("LLM quantization requires a CUDA GPU. Please use 'full precision' on CPU/MPS.")
-
-                    # Try to import bitsandbytes
-                    try:
-                        from transformers import BitsAndBytesConfig
-
-                        logger.info("Quantizing LLM component to 4-bit...")
-                        # Configure 4-bit quantization for LLM only
-                        # Note: lm_head must be skipped to avoid bitsandbytes assertion errors
-                        bnb_config = BitsAndBytesConfig(
-                            load_in_4bit=True,
-                            bnb_4bit_compute_dtype=torch.bfloat16,
-                            bnb_4bit_use_double_quant=True,
-                            bnb_4bit_quant_type='nf4',
-                            # Skip lm_head and non-LLM components to avoid errors
-                            llm_int8_skip_modules=["lm_head", "prediction_head", "acoustic_connector", "semantic_connector", "diffusion_head"]
-                        )
-
-                        model_kwargs["quantization_config"] = bnb_config
-                        model_kwargs["device_map"] = "auto"
-                        logger.info("LLM will be quantized to 4-bit, diffusion head and connectors remain at full precision")
-
-                        # Flag for post-load verification
-                        model_kwargs["_quantization_mode"] = "4bit"
-
-                    except ImportError:
-                        raise Exception(
-                            "LLM quantization requires 'bitsandbytes' library.\n"
-                            "Please install it with: pip install bitsandbytes\n"
-                            "Or use 'full precision' mode instead."
-                        )
+                # REMOVED QUANTIZATION LOGIC to restore FP16/BF16 precision for LoRAs
+                if quantize_llm != "full precision":
+                    logger.warning("Quantization disabled for VibeVoice to prevent LoRA corruption. Using bfloat16.")
 
                 # Set attention implementation based on user selection
                 use_sage_attention = False
@@ -1182,15 +932,14 @@ class BaseVibeVoiceNode:
                 model_kwargs["local_files_only"] = True
 
                 # Extract quantization mode flag before loading (it's not a model parameter)
-                quant_mode = model_kwargs.pop("_quantization_mode", None)
+                # (Ignored now as quantization is disabled)
+                model_kwargs.pop("_quantization_mode", None)
 
                 try:
                     # Use the correct path (parent if 4bit subfolder is used)
                     logger.info(f"Loading model from: {actual_model_path}")
-                    if is_quantized:
-                        logger.info(f"Loading {quantization} quantized model...")
-                        if use_4bit_subfolder:
-                            logger.info(f"Using parent path with subfolder='4bit'")
+                    # Force bfloat16 for all loading
+                    logger.info("Forcing torch_dtype=torch.bfloat16 for model loading")
 
                     self.model = VibeVoiceInferenceModel.from_pretrained(
                         actual_model_path,
@@ -1207,10 +956,6 @@ class BaseVibeVoiceNode:
 
                 elapsed = time.time() - start_time
                 logger.info(f"Model loaded in {elapsed:.2f} seconds")
-
-                # Verify quantization if requested (quant_mode was extracted earlier)
-                if quant_mode:
-                    self._verify_quantization(quant_mode)
 
                 # Verify model was loaded
                 if self.model is None:
