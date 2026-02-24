@@ -275,7 +275,7 @@ class VibeVoice_LoRA_Trainer:
                 "batch_size": ("INT", {"default": 8, "min": 1, "max": 32}),
                 "gradient_accum_steps": ("INT", {"default": 16, "min": 1, "max": 128}), # Default 16 as requested
                 "epochs": ("INT", {"default": 150, "min": 10, "max": 1000}),
-                "learning_rate": ("FLOAT", {"default": 2e-4, "step": 1e-5}),
+                "learning_rate": ("FLOAT", {"default": 2e-4, "min": 1e-6, "max": 0.1, "step": 1e-6}),
                 "mixed_precision": (["bf16", "fp16", "no"], {"default": "bf16"}),
                 "lora_rank": ("INT", {"default": 32, "min": 4, "max": 128}),
                 "lora_alpha": ("INT", {"default": 64, "min": 8, "max": 256}),
