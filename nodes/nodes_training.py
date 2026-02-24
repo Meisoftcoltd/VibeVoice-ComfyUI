@@ -300,11 +300,18 @@ class VibeVoice_LoRA_Trainer:
         for line in iter(process.stdout.readline, b''):
             decoded_line = line.decode('utf-8', errors='replace').rstrip()
 
-            # --- SPAM FILTER ---
-            # Ignore raw dictionary logs emitted by Hugging Face
-            if decoded_line.startswith("{") and decoded_line.endswith("}"):
-                if "'epoch':" in decoded_line or "'loss':" in decoded_line or "debug/" in decoded_line:
-                    continue
+            # --- SUPER SPAM FILTER ---
+            # 1. Hide HF dictionary logs even if attached to a tqdm progress bar
+            if "{'" in decoded_line and "':" in decoded_line and "}" in decoded_line:
+                continue
+
+            # 2. Hide annoying and harmless PEFT vocabulary warnings
+            if "UserWarning: Could not find a config file" in decoded_line or "warnings.warn(" in decoded_line:
+                continue
+
+            # 3. Hide completely empty lines
+            if not decoded_line.strip() or decoded_line.strip() == "[VibeVoice Train]":
+                continue
 
             print(f"[VibeVoice Train] {decoded_line}")
             output_log.append(decoded_line)
