@@ -430,7 +430,6 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
         try:
             _eval_size = max(1, int(len(train_dataset) * {validation_split}))
             _train_size = len(train_dataset) - _eval_size
-            import torch
             train_dataset, eval_dataset = torch.utils.data.random_split(train_dataset, [_train_size, _eval_size], generator=torch.Generator().manual_seed(42))
             print(f"\\\\n[VibeVoice Setup] 🗂️ Split dataset: {{_train_size}} for Training, {{_eval_size}} for Validation.\\\\n")
         except Exception as e:
