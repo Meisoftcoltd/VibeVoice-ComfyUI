@@ -676,6 +676,16 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                     "--do_train"
                 ]
 
+                import multiprocessing
+                # Safely calculate workers: leave some CPUs free, cap at 4 to prevent overhead
+                safe_workers = max(1, min(4, multiprocessing.cpu_count() - 2))
+
+                # Append data loading optimizations to the command
+                command.extend([
+                    "--dataloader_num_workers", str(safe_workers),
+                    "--dataloader_prefetch_factor", "2"
+                ])
+
                 print(f"\n[VibeVoice] Iniciando entrenamiento (Intento {attempt+1}/{max_retries}) | Batch: {current_batch_size} | GradAccum: {current_grad_accum}")
 
                 output_log = []
