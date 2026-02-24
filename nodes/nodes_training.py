@@ -419,29 +419,28 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
         # Inject callback class
         content = re.sub(r"(def main\s*\([^)]*\)\s*(->\s*None)?\s*:)", callback_code + r"\n\g<1>", content, count=1)
 
-        # Build elegant injection for Evaluation Split
-        split_code = f"""
-        # --- AUTO EVAL SPLIT PATCH ---
-        import torch
-        eval_dataset = None
-        if {validation_split} > 0.0:
-            if hasattr(training_args, 'eval_strategy'): training_args.eval_strategy = "epoch"
-            if hasattr(training_args, 'evaluation_strategy'): training_args.evaluation_strategy = "epoch"
-            training_args.do_eval = True
-            try:
-                _eval_size = max(1, int(len(train_dataset) * {validation_split}))
-                _train_size = len(train_dataset) - _eval_size
-                train_dataset, eval_dataset = torch.utils.data.random_split(train_dataset, [_train_size, _eval_size], generator=torch.Generator().manual_seed(42))
-                print(f"\\n[VibeVoice Setup] 🗂️ Split dataset: {{_train_size}} for Training, {{_eval_size}} for Validation.\\n")
-            except Exception as e:
-                print(f"[VibeVoice Setup] ⚠️ Could not split dataset: {{e}}")
+        # Build elegant injection for Evaluation Split (Left-aligned to prevent IndentationError)
+        split_code = f"""    # --- AUTO EVAL SPLIT PATCH ---
+    import torch
+    eval_dataset = None
+    if {validation_split} > 0.0:
+        if hasattr(training_args, 'eval_strategy'): training_args.eval_strategy = "epoch"
+        if hasattr(training_args, 'evaluation_strategy'): training_args.evaluation_strategy = "epoch"
+        training_args.do_eval = True
+        try:
+            _eval_size = max(1, int(len(train_dataset) * {validation_split}))
+            _train_size = len(train_dataset) - _eval_size
+            train_dataset, eval_dataset = torch.utils.data.random_split(train_dataset, [_train_size, _eval_size], generator=torch.Generator().manual_seed(42))
+            print(f"\\\\n[VibeVoice Setup] 🗂️ Split dataset: {{_train_size}} for Training, {{_eval_size}} for Validation.\\\\n")
+        except Exception as e:
+            print(f"[VibeVoice Setup] ⚠️ Could not split dataset: {{e}}")
 
-        trainer = VibeVoiceTrainer(
-            eval_dataset=eval_dataset,
-"""
+    trainer = VibeVoiceTrainer(
+        eval_dataset=eval_dataset,"""
 
         # 1. Replace the VibeVoiceTrainer initialization
-        content = content.replace("trainer = VibeVoiceTrainer(", split_code)
+        # Ensure we are replacing the exact 4-space indented original line
+        content = content.replace("    trainer = VibeVoiceTrainer(", split_code)
 
         # 2. Inject our callback into the existing list to PRESERVE the EmaCallback
         my_callback = f"SmartEarlyStoppingAndSaveCallback(patience={patience}, threshold={threshold}, keep_best_n={save_total_limit}), "
