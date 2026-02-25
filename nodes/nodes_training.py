@@ -281,6 +281,7 @@ class VibeVoice_LoRA_Trainer:
                 "mixed_precision": (["bf16", "fp16", "no"], {"default": "bf16"}),
                 "lora_rank": ("INT", {"default": 32, "min": 4, "max": 128}),
                 "lora_alpha": ("INT", {"default": 64, "min": 8, "max": 256}),
+                "warmup_ratio": ("FLOAT", {"default": 0.10, "min": 0.0, "max": 0.5, "step": 0.01, "tooltip": "Percentage of training for warmup to prevent gradient shock (10% recommended for QLoRA)."}),
                 "early_stopping_patience": ("INT", {"default": 25, "min": 1, "max": 100, "tooltip": "Steps without improvement before stopping."}),
                 "early_stopping_threshold": ("FLOAT", {"default": 0.002, "min": 0.0001, "max": 0.1, "step": 0.001}),
                 "save_total_limit": ("INT", {"default": 3, "min": 1, "max": 10, "tooltip": "Maximum number of BEST models to keep. Worse ones will be deleted."}),
@@ -353,44 +354,51 @@ class VibeVoice_LoRA_Trainer:
         return target_dir
 
     def _read_subprocess_output(self, process, output_log):
-        """Reads subprocess output, updates ComfyUI progress bar, and prints cleanly line-by-line."""
+        """Reads subprocess output, updates ComfyUI progress bar, and handles \\r cleanly."""
         import re
+        import sys
         import comfy.utils
 
         comfy_pbar = None
+        last_was_progress = False
 
         for line in iter(process.stdout.readline, b''):
-            # Split by \r to get the latest chunk, but print normally to avoid console mess
-            parts = line.decode('utf-8', errors='replace').split('\r')
-            decoded_line = parts[-1].rstrip('\n').strip()
+            raw_decoded = line.decode('utf-8', errors='replace').rstrip('\n')
 
-            if not decoded_line or decoded_line == "[VibeVoice Train]":
-                continue
+            # Process ALL parts of a line split by \r to avoid losing tqdm bars appended with text
+            parts = raw_decoded.split('\r')
 
-            # --- SUPER SPAM FILTER ---
-            if "{'" in decoded_line and "':" in decoded_line and "}" in decoded_line:
-                continue
-            if "UserWarning: Could not find a config file" in decoded_line or "warnings.warn(" in decoded_line:
-                continue
+            for part in parts:
+                decoded_line = part.strip()
+                if not decoded_line or decoded_line == "[VibeVoice Train]":
+                    continue
 
-            # Detect tqdm progress bar format
-            is_progress_bar = "%|" in decoded_line and ("it/s]" in decoded_line or "s/it]" in decoded_line or "00:" in decoded_line)
+                # --- SUPER SPAM FILTER ---
+                if "{'" in decoded_line and "':" in decoded_line and "}" in decoded_line: continue
+                if "UserWarning: Could not find a config file" in decoded_line or "warnings.warn(" in decoded_line: continue
 
-            if is_progress_bar:
-                # Update ComfyUI Web UI Progress Bar via regex
-                match = re.search(r"(\d+)/(\d+) \[", decoded_line)
-                if match:
-                    current_step = int(match.group(1))
-                    total_steps = int(match.group(2))
+                is_progress_bar = "%|" in decoded_line and ("it/s]" in decoded_line or "s/it]" in decoded_line or "00:" in decoded_line)
 
-                    if comfy_pbar is None or comfy_pbar.total != total_steps:
-                        comfy_pbar = comfy.utils.ProgressBar(total_steps)
+                if is_progress_bar:
+                    match = re.search(r"(\d+)/(\d+) \[", decoded_line)
+                    if match:
+                        current_step = int(match.group(1))
+                        total_steps = int(match.group(2))
+                        if comfy_pbar is None or comfy_pbar.total != total_steps:
+                            comfy_pbar = comfy.utils.ProgressBar(total_steps)
+                        comfy_pbar.update_absolute(current_step, total_steps)
 
-                    comfy_pbar.update_absolute(current_step, total_steps)
-
-            # Print everything line-by-line normally to avoid the overlapping bug
-            print(f"[VibeVoice Train] {decoded_line}")
-            output_log.append(decoded_line)
+                    # Print progress bar dynamically on one line
+                    sys.stdout.write(f"\r[VibeVoice Train] {decoded_line.ljust(120)}")
+                    sys.stdout.flush()
+                    last_was_progress = True
+                else:
+                    # Normal text: drop to a new line if we previously printed a dynamic progress bar
+                    prefix = "\n" if last_was_progress else ""
+                    sys.stdout.write(f"{prefix}[VibeVoice Train] {decoded_line}\n")
+                    sys.stdout.flush()
+                    output_log.append(decoded_line)
+                    last_was_progress = False
 
         process.stdout.close()
 
@@ -622,6 +630,10 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
 
     if is_4bit or is_8bit:
         print(f"[VibeVoice Loader] 🧊 Detected Quantized Model. Applying BitsAndBytesConfig...")
+
+        # FIX: Inject missing split mapping so accelerate can use 'auto' without crashing
+        VibeVoiceForConditionalGeneration._no_split_modules = ["Qwen2DecoderLayer"]
+
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=is_4bit,
             load_in_8bit=is_8bit,
@@ -630,11 +642,12 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
             bnb_4bit_quant_type="nf4",
             llm_int8_skip_modules=["acoustic_tokenizer", "semantic_tokenizer", "prediction_head", "acoustic_connector", "semantic_connector", "lm_head"]
         )
+
         model = VibeVoiceForConditionalGeneration.from_pretrained(
             model_args.model_name_or_path,
             quantization_config=bnb_config,
             torch_dtype=torch.bfloat16,
-            device_map={"": torch.cuda.current_device() if torch.cuda.is_available() else 0},
+            device_map="auto",
         )
         model = prepare_model_for_kbit_training(model)
         print(f"[VibeVoice Loader] ✅ Model prepared for k-bit training.")
@@ -753,7 +766,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
     def train_lora(self, dataset_path, base_model_path, output_lora_name, batch_size,
                    gradient_accum_steps, epochs, learning_rate, mixed_precision,
                    lora_rank, lora_alpha, early_stopping_patience, early_stopping_threshold,
-                   save_total_limit, validation_split, transformers_version, custom_model_path=""):
+                   save_total_limit, validation_split, transformers_version, warmup_ratio, custom_model_path=""):
 
         # Resolve model path
         model_path_to_use = base_model_path
@@ -816,6 +829,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                     "--gradient_accumulation_steps", str(current_grad_accum),
                     "--num_train_epochs", str(epochs),
                     "--learning_rate", str(learning_rate),
+                    "--warmup_ratio", str(warmup_ratio),
                     "--bf16", "True" if mixed_precision == "bf16" else "False",
                     "--fp16", "True" if mixed_precision == "fp16" else "False",
                     "--lora_r", str(lora_rank),
