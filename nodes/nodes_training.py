@@ -353,8 +353,8 @@ class VibeVoice_LoRA_Trainer:
 
         return target_dir
 
-    def _read_subprocess_output(self, process, output_log):
-        """Reads subprocess output, updates ComfyUI progress bar, and manages dual tqdm bars safely."""
+    def _read_subprocess_output(self, process, output_log, log_path=None):
+        """Reads subprocess output, updates ComfyUI progress bar, and logs to TXT in real-time."""
         import re
         import sys
         import comfy.utils
@@ -364,7 +364,6 @@ class VibeVoice_LoRA_Trainer:
 
         for line in iter(process.stdout.readline, b''):
             raw_decoded = line.decode('utf-8', errors='replace').rstrip('\n')
-
             parts = raw_decoded.split('\r')
 
             for part in parts:
@@ -383,26 +382,20 @@ class VibeVoice_LoRA_Trainer:
                         current_step = int(match.group(1))
                         total_steps = int(match.group(2))
 
-                        # Determine if this is the Main Training bar (thousands of steps) or Validation bar (few steps)
-                        is_validation_bar = total_steps < 1000  # Adjust threshold if necessary
+                        is_validation_bar = total_steps < 1000
 
                         if not is_validation_bar:
-                            # Update ComfyUI UI ONLY for the main training bar
                             if comfy_pbar is None or comfy_pbar.total != total_steps:
                                 comfy_pbar = comfy.utils.ProgressBar(total_steps)
                             comfy_pbar.update_absolute(current_step, total_steps)
 
-                            # Main Bar: Use ANSI clear to keep it pinned to one line
                             sys.stdout.write(f"\r\033[2K[VibeVoice Train][Progress] {decoded_line}")
                             sys.stdout.flush()
                             last_was_main_progress = True
                         else:
-                            # Validation Bar: Do NOT use ANSI clear. Just print with carriage return to avoid upward overwriting.
-                            # Also, tag it correctly.
                             if last_was_main_progress:
                                 sys.stdout.write("\n")
                                 last_was_main_progress = False
-
                             sys.stdout.write(f"\r[VibeVoice Train][Validating] {decoded_line.ljust(80)}")
                             sys.stdout.flush()
                 else:
@@ -410,30 +403,31 @@ class VibeVoice_LoRA_Trainer:
 
                     lower_line = clean_line.lower()
                     cat_tag = ""
-                    if "saving model" in lower_line or "saving checkpoint" in lower_line:
-                        cat_tag = "[Saving]"
-                    elif "tokenizer" in lower_line:
-                        cat_tag = "[Tokenizer]"
-                    elif "loss" in lower_line and not "epoch" in lower_line:
-                        cat_tag = "[Metrics]"
-                    elif "trainable" in lower_line or "lora debug" in lower_line or "parameters" in lower_line:
-                        cat_tag = "[Model]"
-                    elif "error" in lower_line or "traceback" in lower_line:
-                        cat_tag = "[Error]"
-                    elif "warning" in lower_line:
-                        cat_tag = "[Warning]"
-                    elif "epoch" in lower_line and "validation" in lower_line:
-                        cat_tag = ""
-                    else:
-                        cat_tag = "[Info]"
+                    if "saving model" in lower_line or "saving checkpoint" in lower_line: cat_tag = "[Saving]"
+                    elif "tokenizer" in lower_line: cat_tag = "[Tokenizer]"
+                    elif "loss" in lower_line and not "epoch" in lower_line: cat_tag = "[Metrics]"
+                    elif "trainable" in lower_line or "lora debug" in lower_line or "parameters" in lower_line: cat_tag = "[Model]"
+                    elif "error" in lower_line or "traceback" in lower_line: cat_tag = "[Error]"
+                    elif "warning" in lower_line: cat_tag = "[Warning]"
+                    elif "epoch" in lower_line and "validation" in lower_line: cat_tag = ""
+                    else: cat_tag = "[Info]"
 
                     if last_was_main_progress:
                         sys.stdout.write("\n")
                         last_was_main_progress = False
 
-                    sys.stdout.write(f"[VibeVoice Train]{cat_tag} {clean_line}\n")
+                    formatted_line = f"[VibeVoice Train]{cat_tag} {clean_line}"
+                    sys.stdout.write(formatted_line + "\n")
                     sys.stdout.flush()
-                    output_log.append(decoded_line)
+                    output_log.append(formatted_line)
+
+                    # --- REAL-TIME LOG WRITING ---
+                    if log_path:
+                        try:
+                            with open(log_path, "a", encoding="utf-8") as f:
+                                f.write(formatted_line + "\n")
+                        except Exception:
+                            pass
 
         process.stdout.close()
 
@@ -864,6 +858,15 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
         run_prompts_jsonl = os.path.join(dataset_path, f"prompts_run_{unique_id}.jsonl")
         shutil.copy(prompts_jsonl, run_prompts_jsonl)
 
+        # Setup real-time log path
+        log_path = os.path.join(output_dir, "training_log.txt")
+        try:
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write("--- Starting VibeVoice Training Log ---\n")
+        except Exception as e:
+            print(f"[VibeVoice] Warning: Could not create log file: {e}")
+            log_path = None
+
         # Auto-Retry Loop for OOM Protection
         current_batch_size = batch_size
         current_grad_accum = gradient_accum_steps
@@ -917,7 +920,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                 output_log = []
                 process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=repo_dir)
 
-                thread = threading.Thread(target=self._read_subprocess_output, args=(process, output_log))
+                thread = threading.Thread(target=self._read_subprocess_output, args=(process, output_log, log_path))
                 thread.start()
 
                 while process.poll() is None:
@@ -963,14 +966,5 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
 
         if not training_success:
             return ("Fallo en el entrenamiento",)
-
-        # --- SAVE CLEAN TRAINING LOG ---
-        try:
-            log_path = os.path.join(output_dir, "training_log.txt")
-            with open(log_path, "w", encoding="utf-8") as f:
-                f.write("\n".join(output_log))
-            print(f"[VibeVoice] 📝 Log del entrenamiento guardado en: {log_path}")
-        except Exception as e:
-            print(f"[VibeVoice] ⚠️ No se pudo guardar el log: {e}")
 
         return (os.path.abspath(output_dir),)
