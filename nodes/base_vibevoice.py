@@ -9,6 +9,8 @@ import numpy as np
 import re
 import gc
 import json
+import comfy.utils
+import comfy.model_management as mm
 from typing import List, Optional, Tuple, Any, Dict
 from transformers import LogitsProcessor, LogitsProcessorList
 
@@ -1497,16 +1499,28 @@ class BaseVibeVoiceNode:
             # Create stop check function for interruption support
             stop_check_fn = None
             if INTERRUPTION_SUPPORT:
-                def check_comfyui_interrupt():
-                    """Check if ComfyUI has requested interruption"""
+                # --- NATIVE PROGRESS BAR HOOK ---
+                # Estimate total tokens for the progress bar (use your existing logic for the tqdm total here)
+                total_steps = estimated_tokens if 'estimated_tokens' in locals() else 358
+                comfy_pbar = comfy.utils.ProgressBar(total_steps)
+                step_counter = [0]
+
+                def check_comfyui_interrupt(*args, **kwargs):
+                    """Check if ComfyUI has requested interruption and update progress bar"""
+                    step_counter[0] += 1
+                    # Safely cap the progress at 99% so it doesn't overflow if generation exceeds estimated steps
+                    current_prog = min(step_counter[0], total_steps)
+                    comfy_pbar.update_absolute(current_prog, total_steps)
+
+                    # Keep your existing interrupt check
                     try:
+                        mm.throw_exception_if_processing_interrupted()
+                    except Exception:
+                        # Fallback for older ComfyUI versions or custom executors
                         if hasattr(execution, 'PromptExecutor') and hasattr(execution.PromptExecutor, 'interrupted'):
-                            interrupted = execution.PromptExecutor.interrupted
-                            if interrupted:
+                            if execution.PromptExecutor.interrupted:
                                 logger.info("Generation interrupted by user via stop_check_fn")
-                            return interrupted
-                    except:
-                        pass
+                                return True
                     return False
                 
                 stop_check_fn = check_comfyui_interrupt
