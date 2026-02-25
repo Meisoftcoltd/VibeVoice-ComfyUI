@@ -275,7 +275,7 @@ class VibeVoice_LoRA_Trainer:
                 "batch_size": ("INT", {"default": 8, "min": 1, "max": 32}),
                 "gradient_accum_steps": ("INT", {"default": 16, "min": 1, "max": 128}), # Default 16 as requested
                 "epochs": ("INT", {"default": 150, "min": 10, "max": 1000}),
-                "learning_rate": ("FLOAT", {"default": 2e-4, "step": 1e-5}),
+                "learning_rate": ("FLOAT", {"default": 2e-4, "min": 1e-6, "max": 0.1, "step": 1e-6}),
                 "mixed_precision": (["bf16", "fp16", "no"], {"default": "bf16"}),
                 "lora_rank": ("INT", {"default": 32, "min": 4, "max": 128}),
                 "lora_alpha": ("INT", {"default": 64, "min": 8, "max": 256}),
@@ -296,18 +296,21 @@ class VibeVoice_LoRA_Trainer:
     CATEGORY = "VibeVoice/Training"
 
     def _read_subprocess_output(self, process, output_log):
-        """Lee la salida del subproceso asíncronamente y la guarda para análisis."""
+        """Reads subprocess output asynchronously, filters spam, and prints normally."""
         for line in iter(process.stdout.readline, b''):
             decoded_line = line.decode('utf-8', errors='replace').rstrip()
 
-            # --- SPAM FILTER ---
-            # Ignore raw dictionary logs emitted by Hugging Face
-            if decoded_line.startswith("{") and decoded_line.endswith("}"):
-                if "'epoch':" in decoded_line or "'loss':" in decoded_line or "debug/" in decoded_line:
-                    continue
+            # --- SUPER SPAM FILTER ---
+            if "{'" in decoded_line and "':" in decoded_line and "}" in decoded_line:
+                continue
+            if "UserWarning: Could not find a config file" in decoded_line or "warnings.warn(" in decoded_line:
+                continue
+            if not decoded_line.strip() or decoded_line.strip() == "[VibeVoice Train]":
+                continue
 
             print(f"[VibeVoice Train] {decoded_line}")
             output_log.append(decoded_line)
+
         process.stdout.close()
 
     def _patch_early_stopping(self, repo_dir, patience, threshold, save_total_limit, validation_split):
@@ -419,9 +422,9 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
         # Inject callback class
         content = re.sub(r"(def main\s*\([^)]*\)\s*(->\s*None)?\s*:)", callback_code + r"\n\g<1>", content, count=1)
 
+        #  Build elegant injection for Evaluation Split (Left-aligned to prevent IndentationError)
         # Build elegant injection for Evaluation Split (Left-aligned to prevent IndentationError)
         split_code = f"""    # --- AUTO EVAL SPLIT PATCH ---
-    import torch
     eval_dataset = None
     if {validation_split} > 0.0:
         if hasattr(training_args, 'eval_strategy'): training_args.eval_strategy = "epoch"
@@ -435,8 +438,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
         except Exception as e:
             print(f"[VibeVoice Setup] ⚠️ Could not split dataset: {{e}}")
 
-    trainer = VibeVoiceTrainer(
-        eval_dataset=eval_dataset,"""
+    trainer = VibeVoiceTrainer("""
 
         # 1. Replace the VibeVoiceTrainer initialization
         # Ensure we are replacing the exact 4-space indented original line
@@ -650,6 +652,16 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                     "--do_train"
                 ]
 
+                import multiprocessing
+                # Safely calculate workers: leave some CPUs free, cap at 4 to prevent overhead
+                safe_workers = max(1, min(4, multiprocessing.cpu_count() - 2))
+
+                # Append data loading optimizations to the command
+                command.extend([
+                    "--dataloader_num_workers", str(safe_workers),
+                    "--dataloader_prefetch_factor", "2"
+                ])
+
                 print(f"\n[VibeVoice] Iniciando entrenamiento (Intento {attempt+1}/{max_retries}) | Batch: {current_batch_size} | GradAccum: {current_grad_accum}")
 
                 output_log = []
@@ -701,5 +713,14 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
 
         if not training_success:
             return ("Fallo en el entrenamiento",)
+
+        # --- SAVE CLEAN TRAINING LOG ---
+        try:
+            log_path = os.path.join(output_dir, "training_log.txt")
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(output_log))
+            print(f"[VibeVoice] 📝 Log del entrenamiento guardado en: {log_path}")
+        except Exception as e:
+            print(f"[VibeVoice] ⚠️ No se pudo guardar el log: {e}")
 
         return (os.path.abspath(output_dir),)
