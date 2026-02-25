@@ -354,18 +354,17 @@ class VibeVoice_LoRA_Trainer:
         return target_dir
 
     def _read_subprocess_output(self, process, output_log):
-        """Reads subprocess output, updates ComfyUI progress bar, cleanly overwrites console lines, and categorizes logs."""
+        """Reads subprocess output, updates ComfyUI progress bar, and manages dual tqdm bars safely."""
         import re
         import sys
         import comfy.utils
 
         comfy_pbar = None
-        last_was_progress = False
+        last_was_main_progress = False
 
         for line in iter(process.stdout.readline, b''):
             raw_decoded = line.decode('utf-8', errors='replace').rstrip('\n')
 
-            # Process ALL parts of a line split by \r to avoid losing tqdm bars appended with text
             parts = raw_decoded.split('\r')
 
             for part in parts:
@@ -373,7 +372,6 @@ class VibeVoice_LoRA_Trainer:
                 if not decoded_line or decoded_line == "[VibeVoice Train]":
                     continue
 
-                # --- SUPER SPAM FILTER ---
                 if "{'" in decoded_line and "':" in decoded_line and "}" in decoded_line: continue
                 if "UserWarning: Could not find a config file" in decoded_line or "warnings.warn(" in decoded_line: continue
 
@@ -384,19 +382,32 @@ class VibeVoice_LoRA_Trainer:
                     if match:
                         current_step = int(match.group(1))
                         total_steps = int(match.group(2))
-                        if comfy_pbar is None or comfy_pbar.total != total_steps:
-                            comfy_pbar = comfy.utils.ProgressBar(total_steps)
-                        comfy_pbar.update_absolute(current_step, total_steps)
 
-                    # ANSI \033[2K clears the entire line. \r returns cursor to the start.
-                    sys.stdout.write(f"\r\033[2K[VibeVoice Train][Progress] {decoded_line}")
-                    sys.stdout.flush()
-                    last_was_progress = True
+                        # Determine if this is the Main Training bar (thousands of steps) or Validation bar (few steps)
+                        is_validation_bar = total_steps < 1000  # Adjust threshold if necessary
+
+                        if not is_validation_bar:
+                            # Update ComfyUI UI ONLY for the main training bar
+                            if comfy_pbar is None or comfy_pbar.total != total_steps:
+                                comfy_pbar = comfy.utils.ProgressBar(total_steps)
+                            comfy_pbar.update_absolute(current_step, total_steps)
+
+                            # Main Bar: Use ANSI clear to keep it pinned to one line
+                            sys.stdout.write(f"\r\033[2K[VibeVoice Train][Progress] {decoded_line}")
+                            sys.stdout.flush()
+                            last_was_main_progress = True
+                        else:
+                            # Validation Bar: Do NOT use ANSI clear. Just print with carriage return to avoid upward overwriting.
+                            # Also, tag it correctly.
+                            if last_was_main_progress:
+                                sys.stdout.write("\n")
+                                last_was_main_progress = False
+
+                            sys.stdout.write(f"\r[VibeVoice Train][Validating] {decoded_line.ljust(80)}")
+                            sys.stdout.flush()
                 else:
-                    # Clean up the annoying HuggingFace date/time prefix (e.g., "02/25/2026 23:59:22 - INFO - __main__ - ")
                     clean_line = re.sub(r"^\d{2}/\d{2}/\d{4}\s\d{2}:\d{2}:\d{2}\s-\s(?:INFO|WARNING|ERROR)\s-\s[^ ]+\s-\s", "", decoded_line)
 
-                    # Categorize the log line
                     lower_line = clean_line.lower()
                     cat_tag = ""
                     if "saving model" in lower_line or "saving checkpoint" in lower_line:
@@ -412,14 +423,13 @@ class VibeVoice_LoRA_Trainer:
                     elif "warning" in lower_line:
                         cat_tag = "[Warning]"
                     elif "epoch" in lower_line and "validation" in lower_line:
-                        cat_tag = "" # Our custom callback already formats this beautifully
+                        cat_tag = ""
                     else:
                         cat_tag = "[Info]"
 
-                    # Normal text: drop to a new line first if we previously printed a dynamic progress bar
-                    if last_was_progress:
+                    if last_was_main_progress:
                         sys.stdout.write("\n")
-                        last_was_progress = False
+                        last_was_main_progress = False
 
                     sys.stdout.write(f"[VibeVoice Train]{cat_tag} {clean_line}\n")
                     sys.stdout.flush()
