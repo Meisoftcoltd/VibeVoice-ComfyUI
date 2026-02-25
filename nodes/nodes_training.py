@@ -656,18 +656,28 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
     if is_4bit or is_8bit:
         print(f"[VibeVoice Loader] 🧊 Detected Quantized Model. Applying BitsAndBytesConfig...")
 
-        # THE HOLY GRAIL FIX V3: Blanket patch ALL VibeVoice custom classes dynamically
+        # THE HOLY GRAIL FIX V4: Explicitly patch ALL known VibeVoice classes
         VibeVoiceForConditionalGeneration._no_split_modules = ["Qwen2DecoderLayer"]
         try:
-            import vibevoice.modular.modeling_vibevoice as v_mod
-            import inspect
-            # Iterate through all classes in the VibeVoice module
-            for name, cls in inspect.getmembers(v_mod, inspect.isclass):
-                # Inject the attribute into any class that doesn't have it
-                if not hasattr(cls, "_no_split_modules"):
-                    cls._no_split_modules = ["Qwen2DecoderLayer"]
+            from vibevoice.modular.modeling_vibevoice import (
+                VibeVoiceModel,
+                VibeVoiceDiffusionHead,
+                VibeVoiceAcousticTokenizer,
+                VibeVoiceSemanticTokenizer,
+                VibeVoiceConnector
+            )
+
+            # Inject into all core components
+            VibeVoiceModel._no_split_modules = ["Qwen2DecoderLayer"]
+            VibeVoiceDiffusionHead._no_split_modules = ["Qwen2DecoderLayer"]
+            VibeVoiceAcousticTokenizer._no_split_modules = ["Qwen2DecoderLayer"]
+            VibeVoiceSemanticTokenizer._no_split_modules = ["Qwen2DecoderLayer"]
+            VibeVoiceConnector._no_split_modules = ["Qwen2DecoderLayer"]
+            print("[VibeVoice Loader] ✅ VibeVoice core components patched for device_map='auto'.")
+        except ImportError as e:
+            print(f"[VibeVoice Loader] ⚠️ Warning: Could not import all core modules for patching. {{e}}")
         except Exception as e:
-            print(f"[VibeVoice Loader] ⚠️ Warning: Could not blanket patch VibeVoice modules: {{e}}")
+            print(f"[VibeVoice Loader] ⚠️ Warning: Unexpected error during patching: {{e}}")
 
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=is_4bit,
