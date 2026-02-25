@@ -296,20 +296,50 @@ class VibeVoice_LoRA_Trainer:
     CATEGORY = "VibeVoice/Training"
 
     def _read_subprocess_output(self, process, output_log):
-        """Reads subprocess output asynchronously, filters spam, and prints normally."""
+        """Reads subprocess output, updates ComfyUI progress bar, and prints to console."""
+        import re
+        import sys
+        import comfy.utils
+
+        comfy_pbar = None
+
         for line in iter(process.stdout.readline, b''):
-            decoded_line = line.decode('utf-8', errors='replace').rstrip()
+            # tqdm uses \r heavily. Split by \r to get the latest content block
+            parts = line.decode('utf-8', errors='replace').split('\r')
+            decoded_line = parts[-1].rstrip('\n').strip()
+
+            if not decoded_line or decoded_line == "[VibeVoice Train]":
+                continue
 
             # --- SUPER SPAM FILTER ---
             if "{'" in decoded_line and "':" in decoded_line and "}" in decoded_line:
                 continue
             if "UserWarning: Could not find a config file" in decoded_line or "warnings.warn(" in decoded_line:
                 continue
-            if not decoded_line.strip() or decoded_line.strip() == "[VibeVoice Train]":
-                continue
 
-            print(f"[VibeVoice Train] {decoded_line}")
-            output_log.append(decoded_line)
+            # Detect tqdm progress bar format
+            is_progress_bar = "%|" in decoded_line and ("it/s]" in decoded_line or "s/it]" in decoded_line or "00:" in decoded_line)
+
+            if is_progress_bar:
+                # 1. Update ComfyUI Web UI Progress Bar
+                match = re.search(r"(\d+)/(\d+) \[", decoded_line)
+                if match:
+                    current_step = int(match.group(1))
+                    total_steps = int(match.group(2))
+
+                    if comfy_pbar is None or comfy_pbar.total != total_steps:
+                        comfy_pbar = comfy.utils.ProgressBar(total_steps)
+
+                    comfy_pbar.update_absolute(current_step, total_steps)
+
+                # 2. Print to terminal dynamically (padded to overwrite cleanly)
+                sys.stdout.write(f"\r[VibeVoice Train] {decoded_line.ljust(100)}")
+                sys.stdout.flush()
+            else:
+                # Normal text: Drop to a new line to avoid overwriting the progress bar, then print
+                sys.stdout.write(f"\n[VibeVoice Train] {decoded_line}\n")
+                sys.stdout.flush()
+                output_log.append(decoded_line)
 
         process.stdout.close()
 
