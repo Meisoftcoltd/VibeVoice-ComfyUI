@@ -652,6 +652,28 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
             flags=re.DOTALL
         )
 
+        # Prevent the original script from calling .to(device) on the quantized model
+        # The script usually does: model.to(dtype).to(device) or model.to(device)
+        # We will wrap it in a try/except or comment it out if it's a quantized model.
+
+        # Look for the device assignment block in finetune_vibevoice_lora.py:
+        # device = torch.device(...)
+        # model.to(device)
+
+        # A robust way is to replace `model.to(device)` with a check
+        safe_to_injection = """
+    if not getattr(model, "is_loaded_in_8bit", False) and not getattr(model, "is_loaded_in_4bit", False):
+        try:
+            model.to(device)
+        except Exception as e:
+            print(f"[VibeVoice] Ignored manual device move: {e}")
+"""
+        # Replace occurrences of model.to(device)
+        new_content = re.sub(r"model\.to\s*\(\s*device\s*\)", safe_to_injection.strip(), new_content)
+
+        # Also catch model.to(dtype).to(device) or similar chaining if it exists
+        new_content = re.sub(r"model\s*=\s*model\.to\s*\([^)]+\)", "# Removed manual model.to() for QLoRA compatibility", new_content)
+
         if new_content != content:
             with open(target_file, "w", encoding="utf-8") as f:
                 f.write(new_content)
