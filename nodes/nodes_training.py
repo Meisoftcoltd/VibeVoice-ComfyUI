@@ -295,6 +295,61 @@ class VibeVoice_LoRA_Trainer:
     FUNCTION = "train_lora"
     CATEGORY = "VibeVoice/Training"
 
+    def _get_or_download_model(self, model_id):
+        if model_id == "custom_local_path" or os.path.isdir(model_id):
+            return model_id
+
+        try:
+            from huggingface_hub import snapshot_download
+        except ImportError:
+            raise Exception("huggingface_hub not installed")
+
+        import folder_paths
+
+        # Determine target directory in ComfyUI models folder
+        # Handle full repo IDs by taking just the model name
+        safe_name = model_id.split('/')[-1]
+
+        # If we passed a folder name (like VibeVoice-1.5B), map it to repo ID if needed
+        # Or if we passed a full repo ID, map to folder name
+        repo_map = {
+            "VibeVoice-1.5B": "microsoft/VibeVoice-1.5B",
+            "VibeVoice-Large": "aoi-ot/VibeVoice-Large",
+            "VibeVoice-Large-Q8": "FabioSarracino/VibeVoice-Large-Q8",
+            "VibeVoice-Large-Q4": "DevParker/VibeVoice7b-low-vram",
+            "vibevoice-7b-bnb-8bit": "marksverdhai/vibevoice-7b-bnb-8bit",
+            "vibevoice-7b-bnb-4bit": "marksverdhai/vibevoice-7b-bnb-4bit"
+        }
+
+        repo_id = repo_map.get(model_id, model_id) # Default to model_id if not in map (assuming it's a repo id)
+
+        target_dir = os.path.join(folder_paths.models_dir, "vibevoice", safe_name)
+
+        # Check if already downloaded (looking for main weight files)
+        needs_download = True
+        if os.path.exists(target_dir):
+            files = os.listdir(target_dir)
+            if any(f.endswith('.safetensors') or f.endswith('.bin') for f in files):
+                needs_download = False
+
+        if needs_download:
+            print(f"\n[VibeVoice] ⬇️ Model {model_id} (Repo: {repo_id}) not found locally. Downloading to {target_dir}...")
+            try:
+                snapshot_download(
+                    repo_id=repo_id,
+                    local_dir=target_dir,
+                    ignore_patterns=["*.msgpack", "*.h5", "*.ot", "*.md"], # Ignore unnecessary heavy files
+                    local_dir_use_symlinks=False
+                )
+                print(f"[VibeVoice] ✅ Download complete!")
+            except Exception as e:
+                print(f"[VibeVoice] ❌ Download failed: {e}")
+                raise e
+        else:
+            print(f"[VibeVoice] 🔎 Model {safe_name} found locally. Skipping download.")
+
+        return target_dir
+
     def _read_subprocess_output(self, process, output_log):
         """Reads subprocess output, updates ComfyUI progress bar, and prints to console."""
         import re
@@ -678,6 +733,9 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
             if not custom_model_path.strip():
                 raise ValueError("You selected 'custom_local_path' but left the text field empty. Please provide a valid model path.")
             model_path_to_use = custom_model_path.strip()
+        else:
+            # TRIGGER JIT DOWNLOAD HERE
+            model_path_to_use = self._get_or_download_model(base_model_path)
 
         # Paths
         current_dir = os.path.dirname(os.path.realpath(__file__))
