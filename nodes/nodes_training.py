@@ -507,6 +507,70 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
             return True
         return False
 
+    def _patch_quantization_loading(self, repo_dir):
+        target_file = os.path.join(repo_dir, "src", "finetune_vibevoice_lora.py")
+        if not os.path.exists(target_file):
+            return False
+
+        with open(target_file, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        # Check if already patched
+        if "from transformers import BitsAndBytesConfig" in content:
+            return True
+
+        print("[VibeVoice Patch] Patching model loading for dynamic quantization...")
+
+        quant_loading_injection = """
+    # --- DYNAMIC QUANTIZATION LOADING ---
+    import torch
+    from transformers import BitsAndBytesConfig
+    from peft import prepare_model_for_kbit_training
+
+    is_4bit = "4bit" in model_args.model_name_or_path.lower()
+    is_8bit = "8bit" in model_args.model_name_or_path.lower()
+
+    if is_4bit or is_8bit:
+        print(f"[VibeVoice Loader] 🧊 Detected Quantized Model. Applying BitsAndBytesConfig...")
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=is_4bit,
+            load_in_8bit=is_8bit,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+            llm_int8_skip_modules=["acoustic_tokenizer", "semantic_tokenizer", "prediction_head", "acoustic_connector", "semantic_connector", "lm_head"]
+        )
+        model = VibeVoiceForConditionalGeneration.from_pretrained(
+            model_args.model_name_or_path,
+            quantization_config=bnb_config,
+            torch_dtype=torch.bfloat16,
+        )
+        model = prepare_model_for_kbit_training(model)
+        print(f"[VibeVoice Loader] ✅ Model prepared for k-bit training.")
+    else:
+        model = VibeVoiceForConditionalGeneration.from_pretrained(
+            model_args.model_name_or_path,
+            torch_dtype=torch.bfloat16,
+        )
+"""
+        import re
+        # Use a robust regex that consumes the closing parenthesis
+        new_content = re.sub(
+            r"model\s*=\s*VibeVoiceForConditionalGeneration\.from_pretrained\s*\([^)]+\)",
+            quant_loading_injection.strip(),
+            content,
+            flags=re.DOTALL
+        )
+
+        if new_content != content:
+            with open(target_file, "w", encoding="utf-8") as f:
+                f.write(new_content)
+            print("[VibeVoice Patch] Model loading patch applied successfully.")
+            return True
+        else:
+            print("[VibeVoice Patch] Warning: Could not find model loading line to patch.")
+            return False
+
     def _setup_environment(self, repo_dir, venv_dir, transformers_version, patience, threshold, save_total_limit, validation_split):
         """Sets up the training repository and virtual environment."""
 
@@ -523,6 +587,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
         self._patch_flash_attention_import(repo_dir)
         self._patch_early_stopping(repo_dir, patience, threshold, save_total_limit, validation_split)
         self._patch_peft_task_type(repo_dir)  # <--- New PEFT patch
+        self._patch_quantization_loading(repo_dir)  # <--- New Quantization patch
 
         # 2. Create Venv if missing
         if not os.path.exists(venv_dir):
@@ -560,7 +625,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                 subprocess.check_call([pip_cmd, "install", f"transformers=={transformers_version}"], cwd=repo_dir)
 
                 # Install other potentially missing deps
-                subprocess.check_call([pip_cmd, "install", "accelerate", "peft", "soundfile", "librosa"], cwd=repo_dir)
+                subprocess.check_call([pip_cmd, "install", "accelerate", "peft", "soundfile", "librosa", "bitsandbytes"], cwd=repo_dir)
 
                 # Create marker
                 with open(marker_file, "w") as f:
