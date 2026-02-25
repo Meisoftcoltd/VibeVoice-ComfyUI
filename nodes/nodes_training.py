@@ -265,6 +265,8 @@ class VibeVoice_LoRA_Trainer:
             "microsoft/VibeVoice-1.5B",
             "aoi-ot/VibeVoice-Large",
             "microsoft/VibeVoice-7B",
+            "marksverdhai/vibevoice-7b-bnb-8bit",
+            "marksverdhai/vibevoice-7b-bnb-4bit",
             "custom_local_path"
         ]
         return {
@@ -351,15 +353,14 @@ class VibeVoice_LoRA_Trainer:
         return target_dir
 
     def _read_subprocess_output(self, process, output_log):
-        """Reads subprocess output, updates ComfyUI progress bar, and prints to console."""
+        """Reads subprocess output, updates ComfyUI progress bar, and prints cleanly line-by-line."""
         import re
-        import sys
         import comfy.utils
 
         comfy_pbar = None
 
         for line in iter(process.stdout.readline, b''):
-            # tqdm uses \r heavily. Split by \r to get the latest content block
+            # Split by \r to get the latest chunk, but print normally to avoid console mess
             parts = line.decode('utf-8', errors='replace').split('\r')
             decoded_line = parts[-1].rstrip('\n').strip()
 
@@ -376,7 +377,7 @@ class VibeVoice_LoRA_Trainer:
             is_progress_bar = "%|" in decoded_line and ("it/s]" in decoded_line or "s/it]" in decoded_line or "00:" in decoded_line)
 
             if is_progress_bar:
-                # 1. Update ComfyUI Web UI Progress Bar
+                # Update ComfyUI Web UI Progress Bar via regex
                 match = re.search(r"(\d+)/(\d+) \[", decoded_line)
                 if match:
                     current_step = int(match.group(1))
@@ -387,14 +388,9 @@ class VibeVoice_LoRA_Trainer:
 
                     comfy_pbar.update_absolute(current_step, total_steps)
 
-                # 2. Print to terminal dynamically (padded to overwrite cleanly)
-                sys.stdout.write(f"\r[VibeVoice Train] {decoded_line.ljust(100)}")
-                sys.stdout.flush()
-            else:
-                # Normal text: Drop to a new line to avoid overwriting the progress bar, then print
-                sys.stdout.write(f"\n[VibeVoice Train] {decoded_line}\n")
-                sys.stdout.flush()
-                output_log.append(decoded_line)
+            # Print everything line-by-line normally to avoid the overlapping bug
+            print(f"[VibeVoice Train] {decoded_line}")
+            output_log.append(decoded_line)
 
         process.stdout.close()
 
