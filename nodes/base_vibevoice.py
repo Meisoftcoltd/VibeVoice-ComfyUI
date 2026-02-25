@@ -1573,11 +1573,11 @@ class BaseVibeVoiceNode:
             device = next(self.model.parameters()).device
             inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
             
-            # --- DEBUG: Tokenization Trace ---
-            if 'input_ids' in inputs:
-                input_ids = inputs['input_ids']
-                print(f"\n[DEBUG] INPUT_IDS SHAPE: {input_ids.shape}")
-                print(f"[DEBUG] FIRST 20 TOKENS: {input_ids[0][:20].tolist()}")
+            # --- DEBUG: Tokenization Trace (Removed) ---
+            # if 'input_ids' in inputs:
+            #     input_ids = inputs['input_ids']
+            #     print(f"\n[DEBUG] INPUT_IDS SHAPE: {input_ids.shape}")
+            #     print(f"[DEBUG] FIRST 20 TOKENS: {input_ids[0][:20].tolist()}")
             # ---------------------------------
 
             # Estimate tokens for user information (not used as limit)
@@ -1626,7 +1626,7 @@ class BaseVibeVoiceNode:
                     "cfg_scale": cfg_scale,
                     "max_new_tokens": None,
                     "stop_check_fn": stop_check_fn,
-                    "logits_processor": LogitsProcessorList([FirstStepDebugProcessor()])
+                    #"logits_processor": LogitsProcessorList([FirstStepDebugProcessor()]) # Disabled debug processor
                 }
 
                 # FORCE SAMPLING to prevent Greedy Decoding EOS collapse on LoRAs
@@ -1635,7 +1635,7 @@ class BaseVibeVoiceNode:
                 generate_kwargs["temperature"] = temperature
                 generate_kwargs["top_p"] = top_p
 
-                print(f"\n[DEBUG] GENERATION KWARGS: {json.dumps({k: str(v) for k,v in generate_kwargs.items() if k != 'tokenizer' and k != 'logits_processor'}, indent=2)}")
+                # print(f"\n[DEBUG] GENERATION KWARGS: {json.dumps({k: str(v) for k,v in generate_kwargs.items() if k != 'tokenizer' and k != 'logits_processor'}, indent=2)}")
 
                 output = self.model.generate(**inputs, **generate_kwargs)
                 
