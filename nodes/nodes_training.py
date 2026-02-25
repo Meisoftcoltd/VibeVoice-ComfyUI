@@ -631,14 +631,18 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
     if is_4bit or is_8bit:
         print(f"[VibeVoice Loader] 🧊 Detected Quantized Model. Applying BitsAndBytesConfig...")
 
-        # THE HOLY GRAIL FIX V2: Inject missing split mapping for ALL VibeVoice classes
+        # THE HOLY GRAIL FIX V3: Blanket patch ALL VibeVoice custom classes dynamically
         VibeVoiceForConditionalGeneration._no_split_modules = ["Qwen2DecoderLayer"]
         try:
-            # Import the inner core model to patch it as well
-            from vibevoice.modular.modeling_vibevoice import VibeVoiceModel
-            VibeVoiceModel._no_split_modules = ["Qwen2DecoderLayer"]
-        except ImportError:
-            print("[VibeVoice Loader] ⚠️ Warning: Could not import inner VibeVoiceModel for patching.")
+            import vibevoice.modular.modeling_vibevoice as v_mod
+            import inspect
+            # Iterate through all classes in the VibeVoice module
+            for name, cls in inspect.getmembers(v_mod, inspect.isclass):
+                # Inject the attribute into any class that doesn't have it
+                if not hasattr(cls, "_no_split_modules"):
+                    cls._no_split_modules = ["Qwen2DecoderLayer"]
+        except Exception as e:
+            print(f"[VibeVoice Loader] ⚠️ Warning: Could not blanket patch VibeVoice modules: {{e}}")
 
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=is_4bit,
