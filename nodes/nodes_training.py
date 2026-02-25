@@ -634,6 +634,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
             model_args.model_name_or_path,
             quantization_config=bnb_config,
             torch_dtype=torch.bfloat16,
+            device_map="auto",
         )
         model = prepare_model_for_kbit_training(model)
         print(f"[VibeVoice Loader] ✅ Model prepared for k-bit training.")
