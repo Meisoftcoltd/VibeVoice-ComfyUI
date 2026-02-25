@@ -410,6 +410,15 @@ class VibeVoice_LoRA_Trainer:
 
         import re
 
+        # Fix UnboundLocalError: import torch at the top of main()
+        # Find the def main line and insert import torch right after it
+        content = re.sub(
+            r"(def main\s*\([^)]*\)\s*(->\s*None)?\s*:)",
+            r"\1\n    import torch",
+            content,
+            count=1
+        )
+
         # --- SUPPRESS SPAMMY INTRA-EPOCH LOGS ---
         content = re.sub(r"logger\.info\(\{.*?\}\)", "pass  # Suppressed by ComfyUI", content)
         content = re.sub(r"print\(\{.*?\}\)", "pass  # Suppressed by ComfyUI", content)
