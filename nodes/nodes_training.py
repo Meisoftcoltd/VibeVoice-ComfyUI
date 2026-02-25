@@ -631,8 +631,14 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
     if is_4bit or is_8bit:
         print(f"[VibeVoice Loader] 🧊 Detected Quantized Model. Applying BitsAndBytesConfig...")
 
-        # FIX: Inject missing split mapping so accelerate can use 'auto' without crashing
+        # THE HOLY GRAIL FIX V2: Inject missing split mapping for ALL VibeVoice classes
         VibeVoiceForConditionalGeneration._no_split_modules = ["Qwen2DecoderLayer"]
+        try:
+            # Import the inner core model to patch it as well
+            from vibevoice.modular.modeling_vibevoice import VibeVoiceModel
+            VibeVoiceModel._no_split_modules = ["Qwen2DecoderLayer"]
+        except ImportError:
+            print("[VibeVoice Loader] ⚠️ Warning: Could not import inner VibeVoiceModel for patching.")
 
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=is_4bit,
