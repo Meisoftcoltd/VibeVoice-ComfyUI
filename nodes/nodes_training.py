@@ -286,6 +286,7 @@ class VibeVoice_LoRA_Trainer:
                 "early_stopping_threshold": ("FLOAT", {"default": 0.002, "min": 0.0001, "max": 0.1, "step": 0.001}),
                 "save_total_limit": ("INT", {"default": 3, "min": 1, "max": 10, "tooltip": "Maximum number of BEST models to keep. Worse ones will be deleted."}),
                 "validation_split": ("FLOAT", {"default": 0.15, "min": 0.0, "max": 0.5, "step": 0.05, "tooltip": "Percentage of data reserved for validation to prevent overfitting. Set to 0 to disable."}),
+                "warmup_ratio": ("FLOAT", {"default": 0.10, "min": 0.0, "max": 0.5, "step": 0.01}),
                 "resume_training": ("BOOLEAN", {"default": False, "tooltip": "Resume training from the latest checkpoint in the output folder if it was interrupted."}),
                 "transformers_version": ("STRING", {"default": "4.51.3", "multiline": False}), # Providing flexibility
             },
@@ -369,9 +370,7 @@ class VibeVoice_LoRA_Trainer:
 
             for part in parts:
                 decoded_line = part.strip()
-                if not decoded_line or decoded_line == "[VibeVoice Train]":
-                    continue
-
+                if not decoded_line or decoded_line == "[VibeVoice Train]": continue
                 if "{'" in decoded_line and "':" in decoded_line and "}" in decoded_line: continue
                 if "UserWarning: Could not find a config file" in decoded_line or "warnings.warn(" in decoded_line: continue
 
@@ -380,16 +379,13 @@ class VibeVoice_LoRA_Trainer:
                 if is_progress_bar:
                     match = re.search(r"(\d+)/(\d+) \[", decoded_line)
                     if match:
-                        current_step = int(match.group(1))
-                        total_steps = int(match.group(2))
-
+                        current_step, total_steps = int(match.group(1)), int(match.group(2))
                         is_validation_bar = total_steps < 1000
 
                         if not is_validation_bar:
                             if comfy_pbar is None or comfy_pbar.total != total_steps:
                                 comfy_pbar = comfy.utils.ProgressBar(total_steps)
                             comfy_pbar.update_absolute(current_step, total_steps)
-
                             sys.stdout.write(f"\r\033[2K[VibeVoice Train][Progress] {decoded_line}")
                             sys.stdout.flush()
                             last_was_main_progress = True
@@ -401,17 +397,16 @@ class VibeVoice_LoRA_Trainer:
                             sys.stdout.flush()
                 else:
                     clean_line = re.sub(r"^\d{2}/\d{2}/\d{4}\s\d{2}:\d{2}:\d{2}\s-\s(?:INFO|WARNING|ERROR)\s-\s[^ ]+\s-\s", "", decoded_line)
-
                     lower_line = clean_line.lower()
-                    cat_tag = ""
-                    if "saving model" in lower_line or "saving checkpoint" in lower_line: cat_tag = "[Saving]"
+
+                    cat_tag = "[Info]"
+                    if "saving" in lower_line or "deleted" in lower_line: cat_tag = "[Saving]"
                     elif "tokenizer" in lower_line: cat_tag = "[Tokenizer]"
                     elif "loss" in lower_line and not "epoch" in lower_line: cat_tag = "[Metrics]"
                     elif "trainable" in lower_line or "lora debug" in lower_line or "parameters" in lower_line: cat_tag = "[Model]"
                     elif "error" in lower_line or "traceback" in lower_line: cat_tag = "[Error]"
                     elif "warning" in lower_line: cat_tag = "[Warning]"
                     elif "epoch" in lower_line and "validation" in lower_line: cat_tag = ""
-                    else: cat_tag = "[Info]"
 
                     if last_was_main_progress:
                         sys.stdout.write("\n")
@@ -422,14 +417,11 @@ class VibeVoice_LoRA_Trainer:
                     sys.stdout.flush()
                     output_log.append(formatted_line)
 
-                    # --- REAL-TIME LOG WRITING ---
                     if log_path:
                         try:
                             with open(log_path, "a", encoding="utf-8") as f:
                                 f.write(formatted_line + "\n")
-                        except Exception:
-                            pass
-
+                        except Exception: pass
         process.stdout.close()
 
     def _patch_early_stopping(self, repo_dir, patience, threshold, save_total_limit, validation_split):
@@ -479,7 +471,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
 
         self.current_diff_loss = None
         self.current_ce_loss = None
-        self.current_total_loss = float('inf')
+        self.true_mean_loss = float('inf')
 
     def on_log(self, args, state, control, logs=None, **kwargs):
         if logs:
@@ -487,12 +479,9 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
             if is_eval:
                 self.current_diff_loss = logs.get("eval/diffusion_loss", logs.get("eval_diffusion_loss", self.current_diff_loss))
                 self.current_ce_loss = logs.get("eval/ce_loss", logs.get("eval_ce_loss", self.current_ce_loss))
-                self.current_total_loss = logs.get("eval/loss", logs.get("eval_loss", self.current_total_loss))
             else:
-                # Fallback if eval is disabled
                 self.current_diff_loss = logs.get("train/diffusion_loss", logs.get("diffusion_loss", self.current_diff_loss))
                 self.current_ce_loss = logs.get("train/ce_loss", logs.get("ce_loss", self.current_ce_loss))
-                self.current_total_loss = logs.get("loss", self.current_total_loss)
 
     def on_epoch_end(self, args, state, control, **kwargs):
         if self.current_diff_loss is not None and self.current_ce_loss is not None:
@@ -510,8 +499,11 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                 self.counter += 1
                 status = f"🔴 NO CHANGE ⚠️ (Patience: {{self.counter}}/{{self.patience}})"
 
+            # USER'S FIX: Calculate True Mean for fair ranking
+            self.true_mean_loss = (self.current_ce_loss + self.current_diff_loss) / 2.0
+
             print("")
-            print(f"📊 [EPOCH {{current_epoch}} VALIDATION] {{status}} | Text Loss: {{self.current_ce_loss:.4f}} | Audio Loss: {{self.current_diff_loss:.4f}} | Total: {{self.current_total_loss:.4f}}")
+            print(f"📊 [EPOCH {{current_epoch}} VALIDATION] {{status}} | Text Loss: {{self.current_ce_loss:.4f}} | Audio Loss: {{self.current_diff_loss:.4f}} | True Mean: {{self.true_mean_loss:.4f}}")
 
             if self.counter >= self.patience:
                 print(f"\\\\n[VibeVoice Smart Stop] 🛑 AUTO-STOP: Validation loss stagnated for {{self.patience}} epochs.\\\\n")
@@ -520,7 +512,8 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
     def on_save(self, args, state, control, **kwargs):
         ckpt_dir = os.path.join(args.output_dir, f"checkpoint-{{state.global_step}}")
         if os.path.exists(ckpt_dir):
-            self.best_checkpoints.append((self.current_total_loss, ckpt_dir))
+            # Rank based on True Mean
+            self.best_checkpoints.append((self.true_mean_loss, ckpt_dir))
             self.best_checkpoints.sort(key=lambda x: x[0])
 
             while len(self.best_checkpoints) > self.keep_best_n:
@@ -528,7 +521,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                 if os.path.exists(worst_ckpt):
                     try:
                         shutil.rmtree(worst_ckpt)
-                        print(f"[VibeVoice Smart Saver] 🗑️ Deleted worse checkpoint: {{os.path.basename(worst_ckpt)}}")
+                        print(f"[VibeVoice Smart Saver] 🗑️ Deleted worse checkpoint (Mean: {{worst_loss:.4f}}): {{os.path.basename(worst_ckpt)}}")
                     except Exception:
                         pass
 
@@ -538,7 +531,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
         best_lora_dir = os.path.join(best_ckpt, "lora")
         final_lora_dir = os.path.join(args.output_dir, "lora")
 
-        print(f"\\\\n[VibeVoice Smart Saver] 🏆 Training complete! Restoring BEST model from {{os.path.basename(best_ckpt)}} (Val Loss: {{best_loss:.4f}})...")
+        print(f"\\\\n[VibeVoice Smart Saver] 🏆 Training complete! Restoring BEST model from {{os.path.basename(best_ckpt)}} (True Mean: {{best_loss:.4f}})...")
         if os.path.exists(best_lora_dir):
             try:
                 if os.path.exists(final_lora_dir): shutil.rmtree(final_lora_dir)
@@ -652,7 +645,6 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
         print("[VibeVoice Patch] Patching model loading for dynamic quantization...")
 
         quant_loading_injection = """
-    # --- DYNAMIC QUANTIZATION LOADING ---
     import torch
     from transformers import BitsAndBytesConfig
     from peft import prepare_model_for_kbit_training
@@ -663,50 +655,33 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
     if is_4bit or is_8bit:
         print(f"[VibeVoice Loader] 🧊 Detected Quantized Model. Applying BitsAndBytesConfig...")
 
-        # THE HOLY GRAIL FIX V4: Explicitly patch ALL known VibeVoice classes
         VibeVoiceForConditionalGeneration._no_split_modules = ["Qwen2DecoderLayer"]
         try:
             from vibevoice.modular.modeling_vibevoice import (
-                VibeVoiceModel,
-                VibeVoiceDiffusionHead,
-                VibeVoiceAcousticTokenizer,
-                VibeVoiceSemanticTokenizer,
-                VibeVoiceConnector
+                VibeVoiceModel, VibeVoiceDiffusionHead,
+                VibeVoiceAcousticTokenizer, VibeVoiceSemanticTokenizer, VibeVoiceConnector
             )
-
-            # Inject into all core components
             VibeVoiceModel._no_split_modules = ["Qwen2DecoderLayer"]
             VibeVoiceDiffusionHead._no_split_modules = ["Qwen2DecoderLayer"]
             VibeVoiceAcousticTokenizer._no_split_modules = ["Qwen2DecoderLayer"]
             VibeVoiceSemanticTokenizer._no_split_modules = ["Qwen2DecoderLayer"]
             VibeVoiceConnector._no_split_modules = ["Qwen2DecoderLayer"]
-            print("[VibeVoice Loader] ✅ VibeVoice core components patched for device_map='auto'.")
-        except ImportError as e:
-            print(f"[VibeVoice Loader] ⚠️ Warning: Could not import all core modules for patching. {{e}}")
         except Exception as e:
-            print(f"[VibeVoice Loader] ⚠️ Warning: Unexpected error during patching: {{e}}")
+            print(f"[VibeVoice Loader] ⚠️ Warning: Could not patch inner modules: {e}")
 
         bnb_config = BitsAndBytesConfig(
-            load_in_4bit=is_4bit,
-            load_in_8bit=is_8bit,
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4",
+            load_in_4bit=is_4bit, load_in_8bit=is_8bit,
+            bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True, bnb_4bit_quant_type="nf4",
             llm_int8_skip_modules=["acoustic_tokenizer", "semantic_tokenizer", "prediction_head", "acoustic_connector", "semantic_connector", "lm_head"]
         )
 
         model = VibeVoiceForConditionalGeneration.from_pretrained(
-            model_args.model_name_or_path,
-            quantization_config=bnb_config,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
+            model_args.model_name_or_path, quantization_config=bnb_config, torch_dtype=torch.bfloat16, device_map="auto"
         )
         model = prepare_model_for_kbit_training(model)
-        print(f"[VibeVoice Loader] ✅ Model prepared for k-bit training.")
     else:
         model = VibeVoiceForConditionalGeneration.from_pretrained(
-            model_args.model_name_or_path,
-            torch_dtype=torch.bfloat16,
+            model_args.model_name_or_path, torch_dtype=torch.bfloat16
         )
 """
         import re
@@ -861,11 +836,11 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
         run_prompts_jsonl = os.path.join(dataset_path, f"prompts_run_{unique_id}.jsonl")
         shutil.copy(prompts_jsonl, run_prompts_jsonl)
 
-        # Setup real-time log path
+        # Setup real-time log
         log_path = os.path.join(output_dir, "training_log.txt")
         try:
-            with open(log_path, "w", encoding="utf-8") as f:
-                f.write("--- Starting VibeVoice Training Log ---\n")
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write("\n--- Starting/Resuming VibeVoice Training ---\n")
         except Exception as e:
             print(f"[VibeVoice] Warning: Could not create log file: {e}")
             log_path = None
