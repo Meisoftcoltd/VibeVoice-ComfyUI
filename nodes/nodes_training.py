@@ -500,19 +500,21 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
             diff_improved = self.current_diff_loss < (self.best_diff_loss - self.threshold)
             ce_improved = self.current_ce_loss < (self.best_ce_loss - self.threshold)
 
-            status = "🟢 IMPROVED" if (diff_improved or ce_improved) else "🔴 NO CHANGE"
-            print("")
-            print(f"📊 [EPOCH {{current_epoch}} VALIDATION] {{status}} | Text Loss: {{self.current_ce_loss:.4f}} | Audio Loss: {{self.current_diff_loss:.4f}} | Total: {{self.current_total_loss:.4f}}")
-
             if diff_improved or ce_improved:
                 if diff_improved: self.best_diff_loss = self.current_diff_loss
                 if ce_improved: self.best_ce_loss = self.current_ce_loss
                 self.counter = 0
+                status = "🟢 IMPROVED"
             else:
                 self.counter += 1
-                if self.counter >= self.patience:
-                    print(f"\\\\n[VibeVoice Smart Stop] 🛑 AUTO-STOP: Validation loss stagnated for {{self.patience}} epochs.\\\\n")
-                    control.should_training_stop = True
+                status = f"🔴 NO CHANGE ⚠️ (Patience: {{self.counter}}/{{self.patience}})"
+
+            print("")
+            print(f"📊 [EPOCH {{current_epoch}} VALIDATION] {{status}} | Text Loss: {{self.current_ce_loss:.4f}} | Audio Loss: {{self.current_diff_loss:.4f}} | Total: {{self.current_total_loss:.4f}}")
+
+            if self.counter >= self.patience:
+                print(f"\\\\n[VibeVoice Smart Stop] 🛑 AUTO-STOP: Validation loss stagnated for {{self.patience}} epochs.\\\\n")
+                control.should_training_stop = True
 
     def on_save(self, args, state, control, **kwargs):
         ckpt_dir = os.path.join(args.output_dir, f"checkpoint-{{state.global_step}}")
