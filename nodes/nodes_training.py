@@ -903,13 +903,16 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
 
                 # --- RESUME FROM CHECKPOINT LOGIC ---
                 if resume_training:
-                    # Verify if there are actual checkpoints to resume from
-                    has_checkpoints = any(d.startswith("checkpoint-") for d in os.listdir(output_dir)) if os.path.exists(output_dir) else False
-                    if has_checkpoints:
-                        command.extend(["--resume_from_checkpoint", "True"])
-                        print(f"\n[VibeVoice Setup] 🔄 Resuming training from the latest checkpoint in {output_dir}...")
-                    else:
-                        print(f"\n[VibeVoice Setup] ⚠️ Warning: 'resume_training' is True, but no checkpoints were found in {output_dir}. Starting from scratch...")
+                    if os.path.exists(output_dir):
+                        # Get full paths of all checkpoint directories
+                        checkpoints = [os.path.join(output_dir, d) for d in os.listdir(output_dir) if d.startswith("checkpoint-")]
+                        if checkpoints:
+                            # Sort by modification time to find the absolute latest
+                            latest_ckpt = max(checkpoints, key=os.path.getmtime)
+                            command.extend(["--resume_from_checkpoint", latest_ckpt])
+                            print(f"\n[VibeVoice Setup] 🔄 Resuming training from absolute path: {latest_ckpt}...")
+                        else:
+                            print(f"\n[VibeVoice Setup] ⚠️ Warning: 'resume_training' is True, but no checkpoints were found. Starting from scratch...")
 
                 import multiprocessing
                 # Safely calculate workers: leave some CPUs free, cap at 4 to prevent overhead
