@@ -287,7 +287,6 @@ class VibeVoice_LoRA_Trainer:
                 "save_total_limit": ("INT", {"default": 3, "min": 1, "max": 10, "tooltip": "Maximum number of BEST models to keep. Worse ones will be deleted."}),
                 "validation_split": ("FLOAT", {"default": 0.15, "min": 0.0, "max": 0.5, "step": 0.05, "tooltip": "Percentage of data reserved for validation to prevent overfitting. Set to 0 to disable."}),
                 "warmup_ratio": ("FLOAT", {"default": 0.10, "min": 0.0, "max": 0.5, "step": 0.01}),
-                "resume_training": ("BOOLEAN", {"default": False, "tooltip": "Resume training from the latest checkpoint in the output folder if it was interrupted."}),
                 "transformers_version": ("STRING", {"default": "4.51.3", "multiline": False}), # Providing flexibility
             },
             "optional": {
@@ -806,7 +805,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
     def train_lora(self, dataset_path, base_model_path, output_lora_name, batch_size,
                    gradient_accum_steps, epochs, learning_rate, mixed_precision,
                    lora_rank, lora_alpha, early_stopping_patience, early_stopping_threshold,
-                   save_total_limit, validation_split, transformers_version, warmup_ratio, resume_training, custom_model_path=""):
+                   save_total_limit, validation_split, transformers_version, warmup_ratio, custom_model_path=""):
 
         # Resolve model path
         model_path_to_use = base_model_path
@@ -901,19 +900,6 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                     "--do_train"
                 ]
 
-                # --- RESUME FROM CHECKPOINT LOGIC ---
-                if resume_training:
-                    if os.path.exists(output_dir):
-                        # Get full paths of all checkpoint directories
-                        checkpoints = [os.path.join(output_dir, d) for d in os.listdir(output_dir) if d.startswith("checkpoint-")]
-                        if checkpoints:
-                            # Sort by modification time to find the absolute latest
-                            latest_ckpt = max(checkpoints, key=os.path.getmtime)
-                            command.extend(["--resume_from_checkpoint", latest_ckpt])
-                            print(f"\n[VibeVoice Setup] 🔄 Resuming training from absolute path: {latest_ckpt}...")
-                        else:
-                            print(f"\n[VibeVoice Setup] ⚠️ Warning: 'resume_training' is True, but no checkpoints were found. Starting from scratch...")
-
                 import multiprocessing
                 # Safely calculate workers: leave some CPUs free, cap at 4 to prevent overhead
                 safe_workers = max(1, min(4, multiprocessing.cpu_count() - 2))
@@ -958,10 +944,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                             current_grad_accum = current_grad_accum * factor
                             current_batch_size = new_batch
 
-                            # FORCE RESUME SO WE DON'T LOSE PROGRESS
-                            resume_training = True
-
-                            print(f"[VibeVoice OOM Protector] Reiniciando automáticamente con Batch Size: {current_batch_size}, Grad Accum: {current_grad_accum}, Resume: True...\n")
+                            print(f"[VibeVoice OOM Protector] Reiniciando desde cero con Batch Size más seguro: {current_batch_size}, Grad Accum: {current_grad_accum}...\n")
                             torch.cuda.empty_cache()
                             continue # Retry the loop
                         else:
