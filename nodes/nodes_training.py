@@ -286,6 +286,7 @@ class VibeVoice_LoRA_Trainer:
                 "early_stopping_threshold": ("FLOAT", {"default": 0.002, "min": 0.0001, "max": 0.1, "step": 0.001}),
                 "save_total_limit": ("INT", {"default": 3, "min": 1, "max": 10, "tooltip": "Maximum number of BEST models to keep. Worse ones will be deleted."}),
                 "validation_split": ("FLOAT", {"default": 0.15, "min": 0.0, "max": 0.5, "step": 0.05, "tooltip": "Percentage of data reserved for validation to prevent overfitting. Set to 0 to disable."}),
+                "resume_training": ("BOOLEAN", {"default": False, "tooltip": "Resume training from the latest checkpoint in the output folder if it was interrupted."}),
                 "transformers_version": ("STRING", {"default": "4.51.3", "multiline": False}), # Providing flexibility
             },
             "optional": {
@@ -817,7 +818,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
     def train_lora(self, dataset_path, base_model_path, output_lora_name, batch_size,
                    gradient_accum_steps, epochs, learning_rate, mixed_precision,
                    lora_rank, lora_alpha, early_stopping_patience, early_stopping_threshold,
-                   save_total_limit, validation_split, transformers_version, warmup_ratio, custom_model_path=""):
+                   save_total_limit, validation_split, transformers_version, warmup_ratio, resume_training, custom_model_path=""):
 
         # Resolve model path
         model_path_to_use = base_model_path
@@ -906,6 +907,16 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                     "--remove_unused_columns", "False",
                     "--do_train"
                 ]
+
+                # --- RESUME FROM CHECKPOINT LOGIC ---
+                if resume_training:
+                    # Verify if there are actual checkpoints to resume from
+                    has_checkpoints = any(d.startswith("checkpoint-") for d in os.listdir(output_dir)) if os.path.exists(output_dir) else False
+                    if has_checkpoints:
+                        command.extend(["--resume_from_checkpoint", "True"])
+                        print(f"\n[VibeVoice Setup] 🔄 Resuming training from the latest checkpoint in {output_dir}...")
+                    else:
+                        print(f"\n[VibeVoice Setup] ⚠️ Warning: 'resume_training' is True, but no checkpoints were found in {output_dir}. Starting from scratch...")
 
                 import multiprocessing
                 # Safely calculate workers: leave some CPUs free, cap at 4 to prevent overhead
