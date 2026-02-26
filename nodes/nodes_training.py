@@ -527,18 +527,31 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
 
     def on_train_end(self, args, state, control, **kwargs):
         if not self.best_checkpoints: return
-        best_loss, best_ckpt = self.best_checkpoints[0]
-        best_lora_dir = os.path.join(best_ckpt, "lora")
-        final_lora_dir = os.path.join(args.output_dir, "lora")
 
-        print(f"\\\\n[VibeVoice Smart Saver] 🏆 Training complete! Restoring BEST model from {{os.path.basename(best_ckpt)}} (True Mean: {{best_loss:.4f}})...")
-        if os.path.exists(best_lora_dir):
-            try:
-                if os.path.exists(final_lora_dir): shutil.rmtree(final_lora_dir)
-                shutil.copytree(best_lora_dir, final_lora_dir)
-                print("[VibeVoice Smart Saver] ✅ Best model set as final output.\\\\n")
-            except Exception:
-                pass
+        print(f"\\\\n[VibeVoice Smart Saver] 🏆 Training complete! Exporting top {{len(self.best_checkpoints)}} checkpoints...")
+
+        # Export Gold, Silver, Bronze...
+        for idx, (loss_val, ckpt_dir) in enumerate(self.best_checkpoints):
+            rank = idx + 1
+            best_lora_dir = os.path.join(ckpt_dir, "lora")
+            if os.path.exists(best_lora_dir):
+                final_lora_dir = os.path.join(args.output_dir, f"Rank{{rank}}_Loss_{{loss_val:.4f}}")
+                try:
+                    if os.path.exists(final_lora_dir): shutil.rmtree(final_lora_dir)
+                    shutil.copytree(best_lora_dir, final_lora_dir)
+                    print(f"[VibeVoice Smart Saver] ✅ Saved Rank {{rank}} (Mean: {{loss_val:.4f}}) to {{os.path.basename(final_lora_dir)}}")
+                except Exception:
+                    pass
+
+        # CLEANUP: Delete heavy raw checkpoint folders
+        print("[VibeVoice Smart Saver] 🧹 Cleaning up raw checkpoint folders to save disk space...")
+        try:
+            for item in os.listdir(args.output_dir):
+                if item.startswith("checkpoint-"):
+                    shutil.rmtree(os.path.join(args.output_dir, item))
+            print("[VibeVoice Smart Saver] ✨ Cleanup complete.\\\\n")
+        except Exception as e:
+            print(f"[VibeVoice Smart Saver] ⚠️ Minor error during cleanup: {{e}}")
 # --- VIBEVOICE CUSTOM CALLBACK END ---
 """
 
@@ -815,13 +828,17 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
         if not python_cmd:
             return ("Error during setup",)
 
-        # Output directory: ComfyUI models/vibevoice/loras/
+        # EXTRACT BASE MODEL NAME FOR FOLDER
+        base_name_clean = base_model_path.split('/')[-1] if base_model_path != "custom_local_path" else os.path.basename(os.path.normpath(model_path_to_use))
+        final_output_name = f"{output_lora_name}_{base_name_clean}"
+
+        # Output directory using the new appended name
         try:
-            output_dir = os.path.join(folder_paths.models_dir, "vibevoice", "loras", output_lora_name)
+            output_dir = os.path.join(folder_paths.models_dir, "vibevoice", "loras", final_output_name)
         except AttributeError:
             # Fallback if folder_paths is not available (e.g. testing), though user said it is.
             # Using a sensible default if not in ComfyUI environment
-            output_dir = os.path.join(os.getcwd(), "models", "vibevoice", "loras", output_lora_name)
+            output_dir = os.path.join(os.getcwd(), "models", "vibevoice", "loras", final_output_name)
 
         os.makedirs(output_dir, exist_ok=True)
 
@@ -866,6 +883,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                     "--num_train_epochs", str(epochs),
                     "--learning_rate", str(learning_rate),
                     "--warmup_ratio", str(warmup_ratio),
+                    "--gradient_checkpointing", "True",
                     "--bf16", "True" if mixed_precision == "bf16" else "False",
                     "--fp16", "True" if mixed_precision == "fp16" else "False",
                     "--lora_r", str(lora_rank),
@@ -937,7 +955,10 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                             current_grad_accum = current_grad_accum * factor
                             current_batch_size = new_batch
 
-                            print(f"[VibeVoice OOM Protector] Reiniciando automáticamente con Batch Size: {current_batch_size} y Grad Accum: {current_grad_accum}...\n")
+                            # FORCE RESUME SO WE DON'T LOSE PROGRESS
+                            resume_training = True
+
+                            print(f"[VibeVoice OOM Protector] Reiniciando automáticamente con Batch Size: {current_batch_size}, Grad Accum: {current_grad_accum}, Resume: True...\n")
                             torch.cuda.empty_cache()
                             continue # Retry the loop
                         else:
