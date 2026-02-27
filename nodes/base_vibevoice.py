@@ -1595,7 +1595,7 @@ class BaseVibeVoiceNode:
             stop_check_fn = None
             if INTERRUPTION_SUPPORT:
                 # --- NATIVE PROGRESS BAR HOOK ---
-                # Estimate total tokens for the progress bar (use your existing logic for the tqdm total here)
+                # Estimate total tokens for the progress bar
                 total_steps = estimated_tokens if 'estimated_tokens' in locals() else 358
                 comfy_pbar = comfy.utils.ProgressBar(total_steps)
                 step_counter = [0]
@@ -1620,15 +1620,27 @@ class BaseVibeVoiceNode:
                 
                 stop_check_fn = check_comfyui_interrupt
             
+            # --- NUEVO: ESCUDO ANTI-NANS (LogitsProcessor) ---
+            # Esto previene el error 'device-side assert triggered' en CUDA
+            from transformers import LogitsProcessor, LogitsProcessorList
+
+            class NaNSanitizerLogitsProcessor(LogitsProcessor):
+                def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+                    # Si detecta un NaN o Infinito, lo convierte a un valor bajo seguro para evitar el crash de multinomial
+                    if torch.isnan(scores).any() or torch.isinf(scores).any():
+                        scores = torch.nan_to_num(scores, nan=-10000.0, posinf=10000.0, neginf=-10000.0)
+                    return scores
+
+            # -------------------------------------------------
+
             # Generate with official parameters
             with torch.no_grad():
-                # --- DEBUG: Prepare Kwargs and Logits Processor ---
                 generate_kwargs = {
                     "tokenizer": self.processor.tokenizer,
                     "cfg_scale": cfg_scale,
                     "max_new_tokens": None,
                     "stop_check_fn": stop_check_fn,
-                    #"logits_processor": LogitsProcessorList([FirstStepDebugProcessor()]) # Disabled debug processor
+                    "logits_processor": LogitsProcessorList([NaNSanitizerLogitsProcessor()]) # Inyectamos el escudo
                 }
 
                 # FORCE SAMPLING to prevent Greedy Decoding EOS collapse on LoRAs
@@ -1636,8 +1648,6 @@ class BaseVibeVoiceNode:
                 generate_kwargs["do_sample"] = True
                 generate_kwargs["temperature"] = temperature
                 generate_kwargs["top_p"] = top_p
-
-                # print(f"\n[DEBUG] GENERATION KWARGS: {json.dumps({k: str(v) for k,v in generate_kwargs.items() if k != 'tokenizer' and k != 'logits_processor'}, indent=2)}")
 
                 output = self.model.generate(**inputs, **generate_kwargs)
                 
