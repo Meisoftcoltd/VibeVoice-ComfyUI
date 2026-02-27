@@ -185,6 +185,7 @@ def get_available_models() -> List[Tuple[str, str]]:
         # Add default placeholder entries for known models if they are missing (for JIT download)
         # This ensures they appear in the UI list even if not downloaded yet
         models_to_download = [
+            ("VibeVoice-Realtime-0.5B", "microsoft/VibeVoice-Realtime-0.5B"),
             ("VibeVoice-1.5B", "microsoft/VibeVoice-1.5B"),
             ("VibeVoice-Large", "aoi-ot/VibeVoice-Large"),
             ("VibeVoice-Large-Q8", "FabioSarracino/VibeVoice-Large-Q8"),
@@ -839,6 +840,7 @@ class BaseVibeVoiceNode:
         # If we passed a folder name (like VibeVoice-1.5B), map it to repo ID if needed
         # Or if we passed a full repo ID, map to folder name
         repo_map = {
+            "VibeVoice-Realtime-0.5B": "microsoft/VibeVoice-Realtime-0.5B",
             "VibeVoice-1.5B": "microsoft/VibeVoice-1.5B",
             "VibeVoice-Large": "aoi-ot/VibeVoice-Large",
             "VibeVoice-Large-Q8": "FabioSarracino/VibeVoice-Large-Q8",
