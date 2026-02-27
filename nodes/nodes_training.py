@@ -294,8 +294,8 @@ class VibeVoice_LoRA_Trainer:
             }
         }
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("lora_output_dir",)
+    RETURN_TYPES = ("STRING", "AUDIO", "STRING")
+    RETURN_NAMES = ("lora_path", "reference_audio", "reference_text")
     FUNCTION = "train_lora"
     CATEGORY = "VibeVoice/Training"
 
@@ -807,6 +807,8 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                    lora_rank, lora_alpha, early_stopping_patience, early_stopping_threshold,
                    save_total_limit, validation_split, transformers_version, warmup_ratio, custom_model_path=""):
 
+        fallback_audio = {"waveform": torch.zeros((1, 1, 16000)), "sample_rate": 16000}
+
         # Resolve model path
         model_path_to_use = base_model_path
         if base_model_path == "custom_local_path":
@@ -825,7 +827,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
         # Setup Environment
         python_cmd = self._setup_environment(repo_dir, venv_dir, transformers_version, early_stopping_patience, early_stopping_threshold, save_total_limit, validation_split)
         if not python_cmd:
-            return ("Error during setup",)
+            return ("Error during setup", fallback_audio, "")
 
         # EXTRACT BASE MODEL NAME FOR FOLDER
         base_name_clean = base_model_path.split('/')[-1] if base_model_path != "custom_local_path" else os.path.basename(os.path.normpath(model_path_to_use))
@@ -844,7 +846,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
         prompts_jsonl = os.path.join(dataset_path, "prompts.jsonl")
         if not os.path.exists(prompts_jsonl):
              print(f"[Error] prompts.jsonl not found in {dataset_path}")
-             return (output_dir,)
+             return (output_dir, fallback_audio, "")
 
         # Bust Hugging Face cache by creating a unique temporary copy of the dataset
         import uuid
@@ -923,7 +925,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                         print("\n[VibeVoice] Interrupción manual detectada desde ComfyUI. Cancelando entrenamiento...\n")
                         process.terminate()
                         process.wait()
-                        return ("Entrenamiento cancelado manualmente",)
+                        return ("Entrenamiento cancelado manualmente", fallback_audio, "")
                     time.sleep(1)
 
                 thread.join()
@@ -960,6 +962,41 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                 os.remove(run_prompts_jsonl)
 
         if not training_success:
-            return ("Fallo en el entrenamiento",)
+            return ("Fallo en el entrenamiento", fallback_audio, "")
 
-        return (os.path.abspath(output_dir),)
+        # --- EXTRACTION OF REFERENCE AUDIO & TEXT FOR INFERENCE ---
+        reference_audio = fallback_audio
+        reference_text = ""
+
+        try:
+            jsonl_path = os.path.join(dataset_path, "prompts.jsonl")
+            if os.path.exists(jsonl_path):
+                import json
+                import torchaudio
+
+                # Grab the first line/sample from the dataset
+                with open(jsonl_path, "r", encoding="utf-8") as f:
+                    first_line = f.readline()
+
+                if first_line:
+                    data = json.loads(first_line)
+                    audio_rel_path = data.get("audio_path", "")
+                    reference_text = data.get("text", "")
+
+                    audio_full_path = os.path.join(dataset_path, audio_rel_path)
+                    if os.path.exists(audio_full_path):
+                        # 1. Save a physical copy to the LoRA output folder
+                        shutil.copy(audio_full_path, os.path.join(output_dir, "reference_sample.wav"))
+
+                        # 2. Load into ComfyUI AUDIO format
+                        waveform, sample_rate = torchaudio.load(audio_full_path)
+                        # ComfyUI expects [batch, channels, samples], usually batch=1
+                        if waveform.dim() == 2:
+                            waveform = waveform.unsqueeze(0)
+
+                        reference_audio = {"waveform": waveform, "sample_rate": sample_rate}
+                        print(f"\n[VibeVoice Setup] 🎵 Reference audio automatically extracted: {audio_rel_path}")
+        except Exception as e:
+            print(f"\n[VibeVoice Setup] ⚠️ Warning: Could not auto-extract reference audio: {e}")
+
+        return (os.path.abspath(output_dir), reference_audio, reference_text)
