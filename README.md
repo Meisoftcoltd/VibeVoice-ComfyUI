@@ -67,6 +67,7 @@ Puedes descargar los modelos VibeVoice desde HuggingFace:
 
 | Modelo                 | Tamaño | Enlace de Descarga |
 |------------------------|--------|--------------------|
+| **VibeVoice-Realtime-0.5B** | ~2GB | [microsoft/VibeVoice-Realtime-0.5B](https://huggingface.co/microsoft/VibeVoice-Realtime-0.5B) |
 | **VibeVoice-1.5B**     | ~5.4GB | [microsoft/VibeVoice-1.5B](https://huggingface.co/microsoft/VibeVoice-1.5B) |
 | **VibeVoice-Large**    | ~18.7GB | [aoi-ot/VibeVoice-Large](https://huggingface.co/aoi-ot/VibeVoice-Large) |
 | **VibeVoice-Large-Q8** | ~11.6GB | [FabioSarracino/VibeVoice-Large-Q8](https://huggingface.co/FabioSarracino/VibeVoice-Large-Q8) |
@@ -179,6 +180,10 @@ Configura y carga adaptadores LoRA.
 - **Parámetros**: Fuerza del LLM y activación de componentes (difusión, conectores).
 
 ## 🧠 Información de Modelos
+
+### VibeVoice-Realtime-0.5B
+- **VRAM**: ~2GB
+- **Uso**: Modelo ligero y rápido para inferencia en tiempo real.
 
 ### VibeVoice-1.5B
 - **VRAM**: ~6GB
