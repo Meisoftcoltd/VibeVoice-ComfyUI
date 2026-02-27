@@ -110,28 +110,8 @@ def check_and_download_essential_models(vibevoice_dir: str):
         logger.info("Tokenizer missing, attempting download...")
         download_if_missing(tokenizer_repo, tokenizer_dir, tokenizer_patterns)
 
-    # 2. Check/Download Models
-    models_to_download = [
-        ("VibeVoice-1.5B", "microsoft/VibeVoice-1.5B"),
-        ("VibeVoice-Large", "aoi-ot/VibeVoice-Large"),
-        ("VibeVoice-Large-Q8", "FabioSarracino/VibeVoice-Large-Q8"),
-        ("VibeVoice-Large-Q4", "DevParker/VibeVoice7b-low-vram")
-    ]
-
-    downloaded_any = False
-    for folder_name, repo_id in models_to_download:
-        model_dir = os.path.join(vibevoice_dir, folder_name)
-        # Check if model exists before downloading
-        if not check_folder_has_model_files(model_dir):
-             logger.info(f"Model {folder_name} missing, attempting download from {repo_id}...")
-             if download_if_missing(repo_id, model_dir):
-                 downloaded_any = True
-        else:
-            logger.debug(f"Model {folder_name} already exists.")
-
-    if downloaded_any:
-        # Clear cache to ensure new models are picked up
-        _model_cache["models"] = None
+    # 2. Model Downloads are now handled JIT (Just-In-Time) by _get_or_download_model
+    # We no longer iterate and download all models here to prevent blocking behavior.
 
 
 def get_available_models() -> List[Tuple[str, str]]:
@@ -162,8 +142,9 @@ def get_available_models() -> List[Tuple[str, str]]:
     # We only run the download check once per session (first_load_logged is a good proxy for "first use")
     # OR whenever the cache is invalid/empty?
     # Let's stick to checking on first load or if no models found.
-    if not _model_cache["first_load_logged"] or (_model_cache["models"] is not None and not _model_cache["models"]):
-         check_and_download_essential_models(vibevoice_dir)
+    # REMOVED: Eager download check to prevent blocking UI load. Models will be downloaded JIT on execution.
+    # if not _model_cache["first_load_logged"] or (_model_cache["models"] is not None and not _model_cache["models"]):
+    #      check_and_download_essential_models(vibevoice_dir)
 
     # Check if we have a valid cache
     current_time = time.time()
@@ -201,11 +182,30 @@ def get_available_models() -> List[Tuple[str, str]]:
         # Sort by display name for consistent ordering
         models.sort(key=lambda x: x[1])
 
+        # Add default placeholder entries for known models if they are missing (for JIT download)
+        # This ensures they appear in the UI list even if not downloaded yet
+        models_to_download = [
+            ("VibeVoice-1.5B", "microsoft/VibeVoice-1.5B"),
+            ("VibeVoice-Large", "aoi-ot/VibeVoice-Large"),
+            ("VibeVoice-Large-Q8", "FabioSarracino/VibeVoice-Large-Q8"),
+            ("VibeVoice-Large-Q4", "DevParker/VibeVoice7b-low-vram"),
+            ("vibevoice-7b-bnb-8bit", "marksverdhai/vibevoice-7b-bnb-8bit"),
+            ("vibevoice-7b-bnb-4bit", "marksverdhai/vibevoice-7b-bnb-4bit")
+        ]
+
+        existing_model_folders = set(m[0] for m in models)
+
+        for folder, _ in models_to_download:
+            if folder not in existing_model_folders:
+                # Add placeholder entry for missing model
+                # Use folder name as display name to keep it simple and consistent
+                models.append((folder, folder))
+
         # Only log on first scan to avoid spam
         if not _model_cache["first_load_logged"]:
             if not models:
-                logger.warning("No valid models found in vibevoice directory even after download attempt")
-                logger.info(f"Please ensure models are in: {vibevoice_dir}")
+                logger.warning("No valid models found in vibevoice directory")
+                logger.info(f"Models will be downloaded on first execution.")
             else:
                 # Single summary message instead of individual logs
                 logger.info(f"Found {len(models)} VibeVoice model(s) available")
@@ -819,6 +819,66 @@ class BaseVibeVoiceNode:
             logger.error(f"Failed to apply SageAttention: {e}")
             logger.warning("Continuing with standard attention implementation")
     
+    def _get_or_download_model(self, model_id):
+        """JIT Download Helper for VibeVoice Models"""
+        if model_id == "custom_local_path" or os.path.isdir(model_id):
+            return model_id
+
+        try:
+            from huggingface_hub import snapshot_download
+        except ImportError:
+            logger.error("huggingface_hub not installed, cannot download models")
+            raise Exception("huggingface_hub not installed")
+
+        import folder_paths
+
+        # Determine target directory in ComfyUI models folder
+        # Handle full repo IDs by taking just the model name
+        safe_name = model_id.split('/')[-1]
+
+        # If we passed a folder name (like VibeVoice-1.5B), map it to repo ID if needed
+        # Or if we passed a full repo ID, map to folder name
+        repo_map = {
+            "VibeVoice-1.5B": "microsoft/VibeVoice-1.5B",
+            "VibeVoice-Large": "aoi-ot/VibeVoice-Large",
+            "VibeVoice-Large-Q8": "FabioSarracino/VibeVoice-Large-Q8",
+            "VibeVoice-Large-Q4": "DevParker/VibeVoice7b-low-vram",
+            "vibevoice-7b-bnb-8bit": "marksverdhai/vibevoice-7b-bnb-8bit",
+            "vibevoice-7b-bnb-4bit": "marksverdhai/vibevoice-7b-bnb-4bit"
+        }
+
+        repo_id = repo_map.get(model_id, model_id) # Default to model_id if not in map (assuming it's a repo id)
+
+        # But wait, model_id passed here is often the folder name from the UI list.
+        # If it's a repo ID, safe_name handles the folder.
+
+        # Ensure we look in the right place
+        models_dir = folder_paths.get_folder_paths("checkpoints")[0]
+        vibevoice_dir = os.path.join(os.path.dirname(models_dir), "vibevoice")
+        target_dir = os.path.join(vibevoice_dir, safe_name)
+
+        # Check if already downloaded (looking for main weight files)
+        # We reuse our existing check function
+        needs_download = not check_folder_has_model_files(target_dir)
+
+        if needs_download:
+            logger.info(f"⬇️ Model {model_id} (Repo: {repo_id}) not found locally. Downloading to {target_dir}...")
+            try:
+                snapshot_download(
+                    repo_id=repo_id,
+                    local_dir=target_dir,
+                    ignore_patterns=["*.msgpack", "*.h5", "*.ot", "*.md"], # Ignore unnecessary heavy files
+                    local_dir_use_symlinks=False
+                )
+                logger.info(f"✅ Download complete!")
+            except Exception as e:
+                logger.error(f"Download failed: {e}")
+                raise e
+        else:
+            logger.info(f"🔎 Model {safe_name} found locally. Skipping download.")
+
+        return target_dir
+
     def load_model(self, model_name: str, model_folder: str, attention_type: str = "auto", quantize_llm: str = "full precision", lora_path: str = None):
         """Load VibeVoice model with specified attention implementation and optional LoRA
 
@@ -855,6 +915,14 @@ class BaseVibeVoiceNode:
                 models_dir = folder_paths.get_folder_paths("checkpoints")[0]
                 comfyui_models_dir = os.path.join(os.path.dirname(models_dir), "vibevoice")
                 os.makedirs(comfyui_models_dir, exist_ok=True)
+
+                # TRIGGER JIT DOWNLOAD/CHECK HERE
+                # model_folder from UI might be just the folder name if detected,
+                # but if it was added as a default placeholder, we need to ensure it's valid.
+                self._get_or_download_model(model_folder)
+
+                # Also ensure Tokenizer is present
+                check_and_download_essential_models(comfyui_models_dir)
                 
                 # Import time for timing
                 import time
@@ -895,6 +963,11 @@ class BaseVibeVoiceNode:
                 is_quantized_4bit = quantization == "4bit"
                 is_quantized_8bit = quantization == "8bit"
                 is_quantized = is_quantized_4bit or is_quantized_8bit
+
+                # Check for hybrid quantization in model path (marksverdhai models)
+                # These models need BitsAndBytesConfig injected explicitly
+                is_hybrid_4bit = "4bit" in model_files_path.lower() or "4bit" in model_folder.lower()
+                is_hybrid_8bit = "8bit" in model_files_path.lower() or "8bit" in model_folder.lower()
                 
                 # Prepare attention implementation kwargs
                 model_kwargs = {
@@ -903,9 +976,29 @@ class BaseVibeVoiceNode:
                     "torch_dtype": torch.bfloat16, # FORCE BFLOAT16
                     "device_map": get_device_map(),
                 }
+
+                # NEW: Inject BitsAndBytesConfig for hybrid quantized models
+                if is_hybrid_4bit or is_hybrid_8bit:
+                    try:
+                        from transformers import BitsAndBytesConfig
+                        logger.info(f"Detected Hybrid Quantized Model: {model_folder}")
+
+                        model_kwargs["quantization_config"] = BitsAndBytesConfig(
+                            load_in_4bit=is_hybrid_4bit,
+                            load_in_8bit=is_hybrid_8bit,
+                            bnb_4bit_compute_dtype=torch.bfloat16,
+                            bnb_4bit_use_double_quant=True,
+                            bnb_4bit_quant_type="nf4",
+                            llm_int8_skip_modules=["acoustic_tokenizer", "semantic_tokenizer", "prediction_head", "acoustic_connector", "semantic_connector", "lm_head"]
+                        )
+                        logger.info("✅ Applied BitsAndBytesConfig with module skipping for hybrid quantization")
+                    except ImportError:
+                        logger.error("❌ bitsandbytes not installed! Required for this model.")
+                        raise Exception("bitsandbytes is required for this quantized model. Please install it in your ComfyUI python environment (pip install bitsandbytes).")
                 
                 # REMOVED QUANTIZATION LOGIC to restore FP16/BF16 precision for LoRAs
-                if quantize_llm != "full precision":
+                # Only apply if NOT using the new hybrid models
+                elif quantize_llm != "full precision":
                     logger.warning("Quantization disabled for VibeVoice to prevent LoRA corruption. Using bfloat16.")
 
                 # Set attention implementation based on user selection
@@ -1480,11 +1573,11 @@ class BaseVibeVoiceNode:
             device = next(self.model.parameters()).device
             inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
             
-            # --- DEBUG: Tokenization Trace ---
-            if 'input_ids' in inputs:
-                input_ids = inputs['input_ids']
-                print(f"\n[DEBUG] INPUT_IDS SHAPE: {input_ids.shape}")
-                print(f"[DEBUG] FIRST 20 TOKENS: {input_ids[0][:20].tolist()}")
+            # --- DEBUG: Tokenization Trace (Removed) ---
+            # if 'input_ids' in inputs:
+            #     input_ids = inputs['input_ids']
+            #     print(f"\n[DEBUG] INPUT_IDS SHAPE: {input_ids.shape}")
+            #     print(f"[DEBUG] FIRST 20 TOKENS: {input_ids[0][:20].tolist()}")
             # ---------------------------------
 
             # Estimate tokens for user information (not used as limit)
@@ -1533,7 +1626,7 @@ class BaseVibeVoiceNode:
                     "cfg_scale": cfg_scale,
                     "max_new_tokens": None,
                     "stop_check_fn": stop_check_fn,
-                    "logits_processor": LogitsProcessorList([FirstStepDebugProcessor()])
+                    #"logits_processor": LogitsProcessorList([FirstStepDebugProcessor()]) # Disabled debug processor
                 }
 
                 # FORCE SAMPLING to prevent Greedy Decoding EOS collapse on LoRAs
@@ -1542,7 +1635,7 @@ class BaseVibeVoiceNode:
                 generate_kwargs["temperature"] = temperature
                 generate_kwargs["top_p"] = top_p
 
-                print(f"\n[DEBUG] GENERATION KWARGS: {json.dumps({k: str(v) for k,v in generate_kwargs.items() if k != 'tokenizer' and k != 'logits_processor'}, indent=2)}")
+                # print(f"\n[DEBUG] GENERATION KWARGS: {json.dumps({k: str(v) for k,v in generate_kwargs.items() if k != 'tokenizer' and k != 'logits_processor'}, indent=2)}")
 
                 output = self.model.generate(**inputs, **generate_kwargs)
                 
