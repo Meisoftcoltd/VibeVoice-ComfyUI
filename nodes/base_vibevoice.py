@@ -1626,16 +1626,20 @@ class BaseVibeVoiceNode:
 
             class NaNSanitizerLogitsProcessor(LogitsProcessor):
                 def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
-                    # Castear a float32 para evitar underflow/overflow durante el procesamiento
-                    orig_dtype = scores.dtype
-                    scores_fp32 = scores.to(torch.float32)
+                    # Asegurar que estamos trabajando en float32 para evitar underflow
+                    scores = scores.to(torch.float32)
 
-                    if torch.isnan(scores_fp32).any() or torch.isinf(scores_fp32).any():
-                        # Usar nan=0.0 como pidio el usuario y limpiar de forma mas neutra
-                        scores_fp32 = torch.nan_to_num(scores_fp32, nan=0.0, posinf=10000.0, neginf=-10000.0)
+                    if torch.isnan(scores).any() or torch.isinf(scores).any():
+                        # Limpiamos NaNs e Infs
+                        scores = torch.nan_to_num(scores, nan=0.0, posinf=100.0, neginf=-100.0)
 
-                    # Devolver al formato original
-                    return scores_fp32.to(orig_dtype)
+                        # Failsafe: Si por alguna razón todos los scores son extremadamente negativos,
+                        # los reseteamos a 0.0 para que el softmax devuelva una distribución uniforme
+                        # y multinomial no crashee por suma=0
+                        if torch.all(scores < -50.0):
+                            scores = torch.zeros_like(scores)
+
+                    return scores
 
             # -------------------------------------------------
 
