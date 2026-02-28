@@ -262,7 +262,6 @@ class VibeVoice_LoRA_Trainer:
     @classmethod
     def INPUT_TYPES(cls):
         base_models = [
-            "microsoft/VibeVoice-Realtime-0.5B",
             "microsoft/VibeVoice-1.5B",
             "aoi-ot/VibeVoice-Large",
             "microsoft/VibeVoice-7B",
@@ -318,7 +317,6 @@ class VibeVoice_LoRA_Trainer:
         # If we passed a folder name (like VibeVoice-1.5B), map it to repo ID if needed
         # Or if we passed a full repo ID, map to folder name
         repo_map = {
-            "VibeVoice-Realtime-0.5B": "microsoft/VibeVoice-Realtime-0.5B",
             "VibeVoice-1.5B": "microsoft/VibeVoice-1.5B",
             "VibeVoice-Large": "aoi-ot/VibeVoice-Large",
             "VibeVoice-Large-Q8": "FabioSarracino/VibeVoice-Large-Q8",
@@ -671,10 +669,17 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
 
         VibeVoiceForConditionalGeneration._no_split_modules = ["Qwen2DecoderLayer"]
         try:
-            from vibevoice.modular.modeling_vibevoice import (
-                VibeVoiceModel, VibeVoiceDiffusionHead,
-                VibeVoiceAcousticTokenizer, VibeVoiceSemanticTokenizer, VibeVoiceConnector
-            )
+            # En el repo de entrenamiento los módulos suelen estar bajo src.vibevoice o vibevoice
+            try:
+                from src.vibevoice.modular.modeling_vibevoice import (
+                    VibeVoiceModel, VibeVoiceDiffusionHead,
+                    VibeVoiceAcousticTokenizer, VibeVoiceSemanticTokenizer, VibeVoiceConnector
+                )
+            except ImportError:
+                from vibevoice.modular.modeling_vibevoice import (
+                    VibeVoiceModel, VibeVoiceDiffusionHead,
+                    VibeVoiceAcousticTokenizer, VibeVoiceSemanticTokenizer, VibeVoiceConnector
+                )
             VibeVoiceModel._no_split_modules = ["Qwen2DecoderLayer"]
             VibeVoiceDiffusionHead._no_split_modules = ["Qwen2DecoderLayer"]
             VibeVoiceAcousticTokenizer._no_split_modules = ["Qwen2DecoderLayer"]
@@ -689,9 +694,27 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
             llm_int8_skip_modules=["acoustic_tokenizer", "semantic_tokenizer", "prediction_head", "acoustic_connector", "semantic_connector", "lm_head"]
         )
 
-        model = VibeVoiceForConditionalGeneration.from_pretrained(
-            model_args.model_name_or_path, quantization_config=bnb_config, torch_dtype=torch.bfloat16, device_map="auto"
-        )
+        from transformers import AutoConfig
+        try:
+            try:
+                from src.vibevoice.modular.configuration_vibevoice import VibeVoiceConfig
+            except ImportError:
+                from vibevoice.modular.configuration_vibevoice import VibeVoiceConfig
+            config = VibeVoiceConfig.from_pretrained(model_args.model_name_or_path, trust_remote_code=True)
+        except Exception:
+            config = AutoConfig.from_pretrained(model_args.model_name_or_path, trust_remote_code=True)
+
+        # Avoid crashing if the model's config.json already has a quantization_config attribute
+        if hasattr(config, "quantization_config") and config.quantization_config is not None:
+            print("[VibeVoice Loader] ⚠️ Model already has quantization_config. Not passing explicitly to prevent conflict.")
+            model = VibeVoiceForConditionalGeneration.from_pretrained(
+                model_args.model_name_or_path, torch_dtype=torch.bfloat16, device_map="auto"
+            )
+        else:
+            model = VibeVoiceForConditionalGeneration.from_pretrained(
+                model_args.model_name_or_path, quantization_config=bnb_config, torch_dtype=torch.bfloat16, device_map="auto"
+            )
+
         model = prepare_model_for_kbit_training(model)
     else:
         model = VibeVoiceForConditionalGeneration.from_pretrained(

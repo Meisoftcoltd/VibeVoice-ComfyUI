@@ -185,7 +185,6 @@ def get_available_models() -> List[Tuple[str, str]]:
         # Add default placeholder entries for known models if they are missing (for JIT download)
         # This ensures they appear in the UI list even if not downloaded yet
         models_to_download = [
-            ("VibeVoice-Realtime-0.5B", "microsoft/VibeVoice-Realtime-0.5B"),
             ("VibeVoice-1.5B", "microsoft/VibeVoice-1.5B"),
             ("VibeVoice-Large", "aoi-ot/VibeVoice-Large"),
             ("VibeVoice-Large-Q8", "FabioSarracino/VibeVoice-Large-Q8"),
@@ -840,7 +839,6 @@ class BaseVibeVoiceNode:
         # If we passed a folder name (like VibeVoice-1.5B), map it to repo ID if needed
         # Or if we passed a full repo ID, map to folder name
         repo_map = {
-            "VibeVoice-Realtime-0.5B": "microsoft/VibeVoice-Realtime-0.5B",
             "VibeVoice-1.5B": "microsoft/VibeVoice-1.5B",
             "VibeVoice-Large": "aoi-ot/VibeVoice-Large",
             "VibeVoice-Large-Q8": "FabioSarracino/VibeVoice-Large-Q8",
@@ -891,6 +889,9 @@ class BaseVibeVoiceNode:
             quantize_llm: LLM quantization mode ("full precision", "8bit", or "4bit")
             lora_path: Optional path to LoRA adapter directory
         """
+        if "0.5B" in model_folder:
+            raise Exception("El modelo 0.5B ya no está soportado en este nodo. Por favor, utiliza los modelos 1.5B o Large.")
+
         # Check if we need to reload model due to attention type, quantization, or LoRA change
         current_attention = getattr(self, 'current_attention_type', None)
         current_quantize_llm = getattr(self, 'current_quantize_llm', 'full precision')
@@ -1595,7 +1596,7 @@ class BaseVibeVoiceNode:
             stop_check_fn = None
             if INTERRUPTION_SUPPORT:
                 # --- NATIVE PROGRESS BAR HOOK ---
-                # Estimate total tokens for the progress bar (use your existing logic for the tqdm total here)
+                # Estimate total tokens for the progress bar
                 total_steps = estimated_tokens if 'estimated_tokens' in locals() else 358
                 comfy_pbar = comfy.utils.ProgressBar(total_steps)
                 step_counter = [0]
@@ -1620,15 +1621,37 @@ class BaseVibeVoiceNode:
                 
                 stop_check_fn = check_comfyui_interrupt
             
+            # --- NUEVO: ESCUDO ANTI-NANS (LogitsProcessor) ---
+            # Esto previene el error 'device-side assert triggered' en CUDA
+            from transformers import LogitsProcessor, LogitsProcessorList
+
+            class NaNSanitizerLogitsProcessor(LogitsProcessor):
+                def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+                    # Asegurar que estamos trabajando en float32 para evitar underflow
+                    scores = scores.to(torch.float32)
+
+                    if torch.isnan(scores).any() or torch.isinf(scores).any():
+                        # Limpiamos NaNs e Infs
+                        scores = torch.nan_to_num(scores, nan=0.0, posinf=100.0, neginf=-100.0)
+
+                        # Failsafe: Si por alguna razón todos los scores son extremadamente negativos,
+                        # los reseteamos a 0.0 para que el softmax devuelva una distribución uniforme
+                        # y multinomial no crashee por suma=0
+                        if torch.all(scores < -50.0):
+                            scores = torch.zeros_like(scores)
+
+                    return scores
+
+            # -------------------------------------------------
+
             # Generate with official parameters
             with torch.no_grad():
-                # --- DEBUG: Prepare Kwargs and Logits Processor ---
                 generate_kwargs = {
                     "tokenizer": self.processor.tokenizer,
                     "cfg_scale": cfg_scale,
                     "max_new_tokens": None,
                     "stop_check_fn": stop_check_fn,
-                    #"logits_processor": LogitsProcessorList([FirstStepDebugProcessor()]) # Disabled debug processor
+                    "logits_processor": LogitsProcessorList([NaNSanitizerLogitsProcessor()]) # Inyectamos el escudo
                 }
 
                 # FORCE SAMPLING to prevent Greedy Decoding EOS collapse on LoRAs
@@ -1636,8 +1659,6 @@ class BaseVibeVoiceNode:
                 generate_kwargs["do_sample"] = True
                 generate_kwargs["temperature"] = temperature
                 generate_kwargs["top_p"] = top_p
-
-                # print(f"\n[DEBUG] GENERATION KWARGS: {json.dumps({k: str(v) for k,v in generate_kwargs.items() if k != 'tokenizer' and k != 'logits_processor'}, indent=2)}")
 
                 output = self.model.generate(**inputs, **generate_kwargs)
                 
