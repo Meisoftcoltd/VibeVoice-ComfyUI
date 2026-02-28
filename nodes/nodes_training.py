@@ -262,7 +262,6 @@ class VibeVoice_LoRA_Trainer:
     @classmethod
     def INPUT_TYPES(cls):
         base_models = [
-            "microsoft/VibeVoice-Realtime-0.5B",
             "microsoft/VibeVoice-1.5B",
             "aoi-ot/VibeVoice-Large",
             "microsoft/VibeVoice-7B",
@@ -318,7 +317,6 @@ class VibeVoice_LoRA_Trainer:
         # If we passed a folder name (like VibeVoice-1.5B), map it to repo ID if needed
         # Or if we passed a full repo ID, map to folder name
         repo_map = {
-            "VibeVoice-Realtime-0.5B": "microsoft/VibeVoice-Realtime-0.5B",
             "VibeVoice-1.5B": "microsoft/VibeVoice-1.5B",
             "VibeVoice-Large": "aoi-ot/VibeVoice-Large",
             "VibeVoice-Large-Q8": "FabioSarracino/VibeVoice-Large-Q8",
