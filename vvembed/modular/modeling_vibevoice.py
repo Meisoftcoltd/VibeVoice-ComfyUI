@@ -158,11 +158,12 @@ class VibeVoiceModel(VibeVoicePreTrainedModel):
         
         # Initialize speech components if needed
         self.acoustic_tokenizer = AutoModel.from_config(config.acoustic_tokenizer_config).to(dtype)
-        self.semantic_tokenizer = AutoModel.from_config(config.semantic_tokenizer_config).to(dtype)
-
         self.acoustic_connector = SpeechConnector(config.acoustic_vae_dim, lm_config.hidden_size).to(dtype)
-        self.semantic_connector = SpeechConnector(config.semantic_vae_dim, lm_config.hidden_size).to(dtype)
-        
+
+        if hasattr(config, "semantic_tokenizer_config") and config.semantic_tokenizer_config is not None:
+            self.semantic_tokenizer = AutoModel.from_config(config.semantic_tokenizer_config).to(dtype)
+            self.semantic_connector = SpeechConnector(config.semantic_vae_dim, lm_config.hidden_size).to(dtype)
+
         # Register scaling factors as buffers - use 1D tensors for FSDP compatibility
         self.register_buffer('speech_scaling_factor', torch.tensor(float('nan')))  
         self.register_buffer('speech_bias_factor', torch.tensor(float('nan')))
@@ -393,7 +394,9 @@ class VibeVoiceForConditionalGeneration(VibeVoicePreTrainedModel):
         
         x = self.get_input_embeddings()(input_ids)
 
-        semantic_speech_all_connect_features = self.model.semantic_connector(speech_semantic_tensors)
+        semantic_speech_all_connect_features = None
+        if hasattr(self.model, "semantic_connector") and speech_semantic_tensors is not None:
+            semantic_speech_all_connect_features = self.model.semantic_connector(speech_semantic_tensors)
         if speeches_loss_input is not None:
             # only part audio need diffuse
             speech_all_features, speech_all_connect_features = self.forward_speech_features(
