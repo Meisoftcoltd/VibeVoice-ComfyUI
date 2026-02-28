@@ -971,13 +971,25 @@ class BaseVibeVoiceNode:
                 is_hybrid_4bit = "4bit" in model_files_path.lower() or "4bit" in model_folder.lower()
                 is_hybrid_8bit = "8bit" in model_files_path.lower() or "8bit" in model_folder.lower()
                 
+                is_05b_model = "0.5B" in model_folder
+
                 # Prepare attention implementation kwargs
                 model_kwargs = {
                     "cache_dir": comfyui_models_dir,
                     "trust_remote_code": True,
-                    "torch_dtype": torch.bfloat16, # FORCE BFLOAT16
+                    "local_files_only": True,
                     "device_map": get_device_map(),
                 }
+
+                if is_05b_model:
+                    # EXCEPCIÓN PARA EL 0.5B: Forzar float32 y atención eager (apaga sdpa/flash_attention)
+                    # Esto es crítico para evitar NaNs en GPUs que fallan con bfloat16 en modelos pequeños
+                    model_kwargs["torch_dtype"] = torch.float32
+                    model_kwargs["attn_implementation"] = "eager"
+                    logger.warning("Forzando torch.float32 y atención 'eager' para el modelo 0.5B para evitar crashes de CUDA.")
+                else:
+                    # Comportamiento normal para el 1.5B y otros
+                    model_kwargs["torch_dtype"] = torch.bfloat16
 
                 # NEW: Inject BitsAndBytesConfig for hybrid quantized models
                 if is_hybrid_4bit or is_hybrid_8bit:
@@ -1005,25 +1017,28 @@ class BaseVibeVoiceNode:
 
                 # Set attention implementation based on user selection
                 use_sage_attention = False
-                if attention_type == "sage":
-                    # SageAttention requires special handling - can't be set via attn_implementation
-                    if not SAGE_AVAILABLE:
-                        logger.warning("SageAttention not installed, falling back to sdpa")
-                        logger.warning("Install with: pip install sageattention")
-                        model_kwargs["attn_implementation"] = "sdpa"
-                    elif not torch.cuda.is_available():
-                        logger.warning("SageAttention requires CUDA GPU, falling back to sdpa")
-                        model_kwargs["attn_implementation"] = "sdpa"
+
+                # Only process user attention selection if it wasn't already hardcoded for the 0.5B fallback
+                if not is_05b_model:
+                    if attention_type == "sage":
+                        # SageAttention requires special handling - can't be set via attn_implementation
+                        if not SAGE_AVAILABLE:
+                            logger.warning("SageAttention not installed, falling back to sdpa")
+                            logger.warning("Install with: pip install sageattention")
+                            model_kwargs["attn_implementation"] = "sdpa"
+                        elif not torch.cuda.is_available():
+                            logger.warning("SageAttention requires CUDA GPU, falling back to sdpa")
+                            model_kwargs["attn_implementation"] = "sdpa"
+                        else:
+                            # Don't set attn_implementation for sage, will apply after loading
+                            use_sage_attention = True
+                            logger.info("Will apply SageAttention after model loading")
+                    elif attention_type != "auto":
+                        model_kwargs["attn_implementation"] = attention_type
+                        logger.info(f"Using {attention_type} attention implementation")
                     else:
-                        # Don't set attn_implementation for sage, will apply after loading
-                        use_sage_attention = True
-                        logger.info("Will apply SageAttention after model loading")
-                elif attention_type != "auto":
-                    model_kwargs["attn_implementation"] = attention_type
-                    logger.info(f"Using {attention_type} attention implementation")
-                else:
-                    # Auto mode - let transformers decide the best implementation
-                    logger.info("Using auto attention implementation selection")
+                        # Auto mode - let transformers decide the best implementation
+                        logger.info("Using auto attention implementation selection")
                 
                 # Load the model from local path only
                 model_kwargs["local_files_only"] = True
