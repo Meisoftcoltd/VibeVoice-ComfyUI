@@ -695,7 +695,14 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
         )
 
         from transformers import AutoConfig
-        config = AutoConfig.from_pretrained(model_args.model_name_or_path, trust_remote_code=True)
+        try:
+            try:
+                from src.vibevoice.modular.configuration_vibevoice import VibeVoiceConfig
+            except ImportError:
+                from vibevoice.modular.configuration_vibevoice import VibeVoiceConfig
+            config = VibeVoiceConfig.from_pretrained(model_args.model_name_or_path, trust_remote_code=True)
+        except Exception:
+            config = AutoConfig.from_pretrained(model_args.model_name_or_path, trust_remote_code=True)
 
         # Avoid crashing if the model's config.json already has a quantization_config attribute
         if hasattr(config, "quantization_config") and config.quantization_config is not None:
