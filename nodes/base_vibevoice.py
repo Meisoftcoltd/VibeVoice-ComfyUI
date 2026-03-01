@@ -1584,37 +1584,13 @@ class BaseVibeVoiceNode:
                 
                 stop_check_fn = check_comfyui_interrupt
             
-            # --- NUEVO: ESCUDO ANTI-NANS (LogitsProcessor) ---
-            # Esto previene el error 'device-side assert triggered' en CUDA
-            from transformers import LogitsProcessor, LogitsProcessorList
-
-            class NaNSanitizerLogitsProcessor(LogitsProcessor):
-                def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
-                    # Asegurar que estamos trabajando en float32 para evitar underflow
-                    scores = scores.to(torch.float32)
-
-                    if torch.isnan(scores).any() or torch.isinf(scores).any():
-                        # Limpiamos NaNs e Infs
-                        scores = torch.nan_to_num(scores, nan=0.0, posinf=100.0, neginf=-100.0)
-
-                        # Failsafe: Si por alguna razón todos los scores son extremadamente negativos,
-                        # los reseteamos a 0.0 para que el softmax devuelva una distribución uniforme
-                        # y multinomial no crashee por suma=0
-                        if torch.all(scores < -50.0):
-                            scores = torch.zeros_like(scores)
-
-                    return scores
-
-            # -------------------------------------------------
-
             # Generate with official parameters
             with torch.no_grad():
                 generate_kwargs = {
                     "tokenizer": self.processor.tokenizer,
                     "cfg_scale": cfg_scale,
                     "max_new_tokens": None,
-                    "stop_check_fn": stop_check_fn,
-                    "logits_processor": LogitsProcessorList([NaNSanitizerLogitsProcessor()]) # Inyectamos el escudo
+                    "stop_check_fn": stop_check_fn
                 }
 
                 # FORCE SAMPLING to prevent Greedy Decoding EOS collapse on LoRAs

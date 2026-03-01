@@ -636,6 +636,11 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
             return True
         return False
 
+    def _setup_environment(self, repo_dir, venv_dir, transformers_version, patience, threshold, save_total_limit, validation_split):
+        """Sets up the training repository and virtual environment."""
+        import sys
+
+        # 1. Clone Repo if missing
         if not os.path.exists(repo_dir):
             print(f"[VibeVoice Setup] Cloning training repository to {repo_dir}...")
             try:
