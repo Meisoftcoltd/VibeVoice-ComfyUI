@@ -503,20 +503,35 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                 control.should_training_stop = True
 
     def on_save(self, args, state, control, **kwargs):
-        ckpt_dir = os.path.join(args.output_dir, f"checkpoint-{{state.global_step}}")
-        if os.path.exists(ckpt_dir):
+        current_ckpt_dir = os.path.join(args.output_dir, f"checkpoint-{{state.global_step}}")
+
+        if os.path.exists(current_ckpt_dir):
             # Rank based on True Mean
-            self.best_checkpoints.append((self.true_mean_loss, ckpt_dir))
+            self.best_checkpoints.append((self.true_mean_loss, current_ckpt_dir))
             self.best_checkpoints.sort(key=lambda x: x[0])
 
-            while len(self.best_checkpoints) > self.keep_best_n:
-                worst_loss, worst_ckpt = self.best_checkpoints.pop(-1)
-                if os.path.exists(worst_ckpt):
-                    try:
-                        shutil.rmtree(worst_ckpt)
-                        print(f"[VibeVoice Smart Saver] 🗑️ Deleted worse checkpoint (Mean: {{worst_loss:.4f}}): {{os.path.basename(worst_ckpt)}}")
-                    except Exception:
-                        pass
+            # Keep only top N in tracking list
+            if len(self.best_checkpoints) > self.keep_best_n:
+                # Discard worst from tracking list, but do NOT delete it yet if it is the current one
+                self.best_checkpoints.pop(-1)
+
+            # Hot Cleanup: Delete previous checkpoints if they are not in the Top N
+            # WE MUST KEEP THE CURRENT CHECKPOINT ALWAYS so training can resume if it crashes right after this.
+            top_n_paths = [ckpt for _, ckpt in self.best_checkpoints]
+
+            try:
+                for item in os.listdir(args.output_dir):
+                    if item.startswith("checkpoint-"):
+                        ckpt_path = os.path.join(args.output_dir, item)
+                        # Delete if it's NOT the current one being saved AND NOT in the Top N list
+                        if ckpt_path != current_ckpt_dir and ckpt_path not in top_n_paths:
+                            try:
+                                shutil.rmtree(ckpt_path)
+                                print(f"[VibeVoice Smart Saver] 🗑️ Hot Cleanup: Deleted checkpoint {{item}} to save disk space.")
+                            except Exception:
+                                pass
+            except Exception as e:
+                pass
 
     def on_train_end(self, args, state, control, **kwargs):
         if not self.best_checkpoints: return
@@ -536,8 +551,8 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                 except Exception:
                     pass
 
-        # CLEANUP: Delete heavy raw checkpoint folders
-        print("[VibeVoice Smart Saver] 🧹 Cleaning up raw checkpoint folders to save disk space...")
+        # Final Cleanup: Delete ALL raw checkpoint folders (since we exported the best ones)
+        print("[VibeVoice Smart Saver] 🧹 Final Cleanup: Deleting raw checkpoint folders to save disk space...")
         try:
             for item in os.listdir(args.output_dir):
                 if item.startswith("checkpoint-"):
