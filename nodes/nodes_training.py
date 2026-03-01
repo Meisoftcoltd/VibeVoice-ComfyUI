@@ -773,14 +773,25 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                 # Check for existing checkpoints in output_dir to auto-resume
                 resume_args = []
                 if os.path.exists(output_dir):
-                    # Find folders starting with 'checkpoint-'
-                    checkpoints = [d for d in os.listdir(output_dir) if d.startswith("checkpoint-") and os.path.isdir(os.path.join(output_dir, d))]
-                    if checkpoints:
-                        print(f"\n[VibeVoice Loader] 🔄 Found existing checkpoints in {output_dir}. Auto-resuming training...")
-                        # Pass True so HuggingFace Trainer automatically finds the latest checkpoint
-                        resume_args = ["--resume_from_checkpoint", "True"]
-                    else:
-                        print(f"\n[VibeVoice Loader] ▶️ No existing checkpoints found. Starting training from scratch...")
+                    try:
+                        from transformers.trainer_utils import get_last_checkpoint
+                        last_checkpoint = get_last_checkpoint(output_dir)
+                        if last_checkpoint is not None:
+                            print(f"\n[VibeVoice Loader] 🔄 Found existing checkpoint! Auto-resuming training from {last_checkpoint}...")
+                            resume_args = ["--resume_from_checkpoint", last_checkpoint]
+                        else:
+                            print(f"\n[VibeVoice Loader] ▶️ No valid checkpoints found. Starting training from scratch...")
+                    except Exception as e:
+                        # Fallback parsing if get_last_checkpoint fails or transformers is missing locally
+                        checkpoints = [d for d in os.listdir(output_dir) if d.startswith("checkpoint-") and os.path.isdir(os.path.join(output_dir, d))]
+                        if checkpoints:
+                            # Sort by step number to find the latest
+                            checkpoints.sort(key=lambda x: int(x.split("-")[-1]))
+                            last_checkpoint = os.path.join(output_dir, checkpoints[-1])
+                            print(f"\n[VibeVoice Loader] 🔄 Found existing checkpoint (fallback parse)! Auto-resuming training from {last_checkpoint}...")
+                            resume_args = ["--resume_from_checkpoint", last_checkpoint]
+                        else:
+                            print(f"\n[VibeVoice Loader] ▶️ No existing checkpoints found. Starting training from scratch...")
 
                 # Construct Command dynamically with current batch/accum
                 command = [
