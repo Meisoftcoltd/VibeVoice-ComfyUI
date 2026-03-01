@@ -265,8 +265,6 @@ class VibeVoice_LoRA_Trainer:
             "microsoft/VibeVoice-1.5B",
             "aoi-ot/VibeVoice-Large",
             "microsoft/VibeVoice-7B",
-            "marksverdhai/vibevoice-7b-bnb-8bit",
-            "marksverdhai/vibevoice-7b-bnb-4bit",
             "custom_local_path"
         ]
         return {
@@ -318,11 +316,7 @@ class VibeVoice_LoRA_Trainer:
         # Or if we passed a full repo ID, map to folder name
         repo_map = {
             "VibeVoice-1.5B": "microsoft/VibeVoice-1.5B",
-            "VibeVoice-Large": "aoi-ot/VibeVoice-Large",
-            "VibeVoice-Large-Q8": "FabioSarracino/VibeVoice-Large-Q8",
-            "VibeVoice-Large-Q4": "DevParker/VibeVoice7b-low-vram",
-            "vibevoice-7b-bnb-8bit": "marksverdhai/vibevoice-7b-bnb-8bit",
-            "vibevoice-7b-bnb-4bit": "marksverdhai/vibevoice-7b-bnb-4bit"
+            "VibeVoice-Large": "aoi-ot/VibeVoice-Large"
         }
 
         repo_id = repo_map.get(model_id, model_id) # Default to model_id if not in map (assuming it's a repo id)
@@ -642,129 +636,6 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
             return True
         return False
 
-    def _patch_quantization_loading(self, repo_dir):
-        target_file = os.path.join(repo_dir, "src", "finetune_vibevoice_lora.py")
-        if not os.path.exists(target_file):
-            return False
-
-        with open(target_file, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        # Check if already patched
-        if "from transformers import BitsAndBytesConfig" in content:
-            return True
-
-        print("[VibeVoice Patch] Patching model loading for dynamic quantization...")
-
-        quant_loading_injection = """
-    import torch
-    from transformers import BitsAndBytesConfig
-    from peft import prepare_model_for_kbit_training
-
-    is_4bit = "4bit" in model_args.model_name_or_path.lower()
-    is_8bit = "8bit" in model_args.model_name_or_path.lower()
-
-    if is_4bit or is_8bit:
-        print(f"[VibeVoice Loader] 🧊 Detected Quantized Model. Applying BitsAndBytesConfig...")
-
-        VibeVoiceForConditionalGeneration._no_split_modules = ["Qwen2DecoderLayer"]
-        try:
-            # En el repo de entrenamiento los módulos suelen estar bajo src.vibevoice o vibevoice
-            try:
-                from src.vibevoice.modular.modeling_vibevoice import (
-                    VibeVoiceModel, VibeVoiceDiffusionHead,
-                    VibeVoiceAcousticTokenizer, VibeVoiceSemanticTokenizer, VibeVoiceConnector
-                )
-            except ImportError:
-                from vibevoice.modular.modeling_vibevoice import (
-                    VibeVoiceModel, VibeVoiceDiffusionHead,
-                    VibeVoiceAcousticTokenizer, VibeVoiceSemanticTokenizer, VibeVoiceConnector
-                )
-            VibeVoiceModel._no_split_modules = ["Qwen2DecoderLayer"]
-            VibeVoiceDiffusionHead._no_split_modules = ["Qwen2DecoderLayer"]
-            VibeVoiceAcousticTokenizer._no_split_modules = ["Qwen2DecoderLayer"]
-            VibeVoiceSemanticTokenizer._no_split_modules = ["Qwen2DecoderLayer"]
-            VibeVoiceConnector._no_split_modules = ["Qwen2DecoderLayer"]
-        except Exception as e:
-            print(f"[VibeVoice Loader] ⚠️ Warning: Could not patch inner modules: {e}")
-
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=is_4bit, load_in_8bit=is_8bit,
-            bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True, bnb_4bit_quant_type="nf4",
-            llm_int8_skip_modules=["acoustic_tokenizer", "semantic_tokenizer", "prediction_head", "acoustic_connector", "semantic_connector", "lm_head"]
-        )
-
-        from transformers import AutoConfig
-        try:
-            try:
-                from src.vibevoice.modular.configuration_vibevoice import VibeVoiceConfig
-            except ImportError:
-                from vibevoice.modular.configuration_vibevoice import VibeVoiceConfig
-            config = VibeVoiceConfig.from_pretrained(model_args.model_name_or_path, trust_remote_code=True)
-        except Exception:
-            config = AutoConfig.from_pretrained(model_args.model_name_or_path, trust_remote_code=True)
-
-        # Avoid crashing if the model's config.json already has a quantization_config attribute
-        if hasattr(config, "quantization_config") and config.quantization_config is not None:
-            print("[VibeVoice Loader] ⚠️ Model already has quantization_config. Not passing explicitly to prevent conflict.")
-            model = VibeVoiceForConditionalGeneration.from_pretrained(
-                model_args.model_name_or_path, torch_dtype=torch.bfloat16, device_map="auto"
-            )
-        else:
-            model = VibeVoiceForConditionalGeneration.from_pretrained(
-                model_args.model_name_or_path, quantization_config=bnb_config, torch_dtype=torch.bfloat16, device_map="auto"
-            )
-
-        model = prepare_model_for_kbit_training(model)
-    else:
-        model = VibeVoiceForConditionalGeneration.from_pretrained(
-            model_args.model_name_or_path, torch_dtype=torch.bfloat16
-        )
-"""
-        import re
-        # Use a robust regex that consumes the closing parenthesis
-        new_content = re.sub(
-            r"model\s*=\s*VibeVoiceForConditionalGeneration\.from_pretrained\s*\([^)]+\)",
-            quant_loading_injection.strip(),
-            content,
-            flags=re.DOTALL
-        )
-
-        # Prevent the original script from calling .to(device) on the quantized model
-        # The script usually does: model.to(dtype).to(device) or model.to(device)
-        # We will wrap it in a try/except or comment it out if it's a quantized model.
-
-        # Look for the device assignment block in finetune_vibevoice_lora.py:
-        # device = torch.device(...)
-        # model.to(device)
-
-        # A robust way is to replace `model.to(device)` with a check
-        safe_to_injection = """
-    if not getattr(model, "is_loaded_in_8bit", False) and not getattr(model, "is_loaded_in_4bit", False):
-        try:
-            model.to(device)
-        except Exception as e:
-            print(f"[VibeVoice] Ignored manual device move: {e}")
-"""
-        # Replace occurrences of model.to(device)
-        new_content = re.sub(r"model\.to\s*\(\s*device\s*\)", safe_to_injection.strip(), new_content)
-
-        # Also catch model.to(dtype).to(device) or similar chaining if it exists
-        new_content = re.sub(r"model\s*=\s*model\.to\s*\([^)]+\)", "# Removed manual model.to() for QLoRA compatibility", new_content)
-
-        if new_content != content:
-            with open(target_file, "w", encoding="utf-8") as f:
-                f.write(new_content)
-            print("[VibeVoice Patch] Model loading patch applied successfully.")
-            return True
-        else:
-            print("[VibeVoice Patch] Warning: Could not find model loading line to patch.")
-            return False
-
-    def _setup_environment(self, repo_dir, venv_dir, transformers_version, patience, threshold, save_total_limit, validation_split):
-        """Sets up the training repository and virtual environment."""
-
-        # 1. Clone Repo if missing
         if not os.path.exists(repo_dir):
             print(f"[VibeVoice Setup] Cloning training repository to {repo_dir}...")
             try:
@@ -777,7 +648,6 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
         self._patch_flash_attention_import(repo_dir)
         self._patch_early_stopping(repo_dir, patience, threshold, save_total_limit, validation_split)
         self._patch_peft_task_type(repo_dir)  # <--- New PEFT patch
-        self._patch_quantization_loading(repo_dir)  # <--- New Quantization patch
 
         # 2. Create Venv if missing
         if not os.path.exists(venv_dir):
@@ -894,6 +764,19 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
 
         try:
             for attempt in range(max_retries):
+
+                # Check for existing checkpoints in output_dir to auto-resume
+                resume_args = []
+                if os.path.exists(output_dir):
+                    # Find folders starting with 'checkpoint-'
+                    checkpoints = [d for d in os.listdir(output_dir) if d.startswith("checkpoint-") and os.path.isdir(os.path.join(output_dir, d))]
+                    if checkpoints:
+                        print(f"\n[VibeVoice Loader] 🔄 Found existing checkpoints in {output_dir}. Auto-resuming training...")
+                        # Pass True so HuggingFace Trainer automatically finds the latest checkpoint
+                        resume_args = ["--resume_from_checkpoint", "True"]
+                    else:
+                        print(f"\n[VibeVoice Loader] ▶️ No existing checkpoints found. Starting training from scratch...")
+
                 # Construct Command dynamically with current batch/accum
                 command = [
                     python_cmd, "-m", "src.finetune_vibevoice_lora",
@@ -935,6 +818,10 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                     "--dataloader_prefetch_factor", "2"
                 ])
 
+                # Append resume arguments if any
+                if resume_args:
+                    command.extend(resume_args)
+
                 print(f"\n[VibeVoice] Iniciando entrenamiento (Intento {attempt+1}/{max_retries}) | Batch: {current_batch_size} | GradAccum: {current_grad_accum}")
 
                 output_log = []
@@ -969,7 +856,7 @@ class SmartEarlyStoppingAndSaveCallback(TrainerCallback):
                             current_grad_accum = current_grad_accum * factor
                             current_batch_size = new_batch
 
-                            print(f"[VibeVoice OOM Protector] Reiniciando desde cero con Batch Size más seguro: {current_batch_size}, Grad Accum: {current_grad_accum}...\n")
+                            print(f"[VibeVoice OOM Protector] Reiniciando intento con Batch Size más seguro: {current_batch_size}, Grad Accum: {current_grad_accum}...\n")
                             torch.cuda.empty_cache()
                             continue # Retry the loop
                         else:

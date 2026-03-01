@@ -186,11 +186,7 @@ def get_available_models() -> List[Tuple[str, str]]:
         # This ensures they appear in the UI list even if not downloaded yet
         models_to_download = [
             ("VibeVoice-1.5B", "microsoft/VibeVoice-1.5B"),
-            ("VibeVoice-Large", "aoi-ot/VibeVoice-Large"),
-            ("VibeVoice-Large-Q8", "FabioSarracino/VibeVoice-Large-Q8"),
-            ("VibeVoice-Large-Q4", "DevParker/VibeVoice7b-low-vram"),
-            ("vibevoice-7b-bnb-8bit", "marksverdhai/vibevoice-7b-bnb-8bit"),
-            ("vibevoice-7b-bnb-4bit", "marksverdhai/vibevoice-7b-bnb-4bit")
+            ("VibeVoice-Large", "aoi-ot/VibeVoice-Large")
         ]
 
         existing_model_folders = set(m[0] for m in models)
@@ -840,11 +836,7 @@ class BaseVibeVoiceNode:
         # Or if we passed a full repo ID, map to folder name
         repo_map = {
             "VibeVoice-1.5B": "microsoft/VibeVoice-1.5B",
-            "VibeVoice-Large": "aoi-ot/VibeVoice-Large",
-            "VibeVoice-Large-Q8": "FabioSarracino/VibeVoice-Large-Q8",
-            "VibeVoice-Large-Q4": "DevParker/VibeVoice7b-low-vram",
-            "vibevoice-7b-bnb-8bit": "marksverdhai/vibevoice-7b-bnb-8bit",
-            "vibevoice-7b-bnb-4bit": "marksverdhai/vibevoice-7b-bnb-4bit"
+            "VibeVoice-Large": "aoi-ot/VibeVoice-Large"
         }
 
         repo_id = repo_map.get(model_id, model_id) # Default to model_id if not in map (assuming it's a repo id)
@@ -966,11 +958,6 @@ class BaseVibeVoiceNode:
                 is_quantized_4bit = quantization == "4bit"
                 is_quantized_8bit = quantization == "8bit"
                 is_quantized = is_quantized_4bit or is_quantized_8bit
-
-                # Check for hybrid quantization in model path (marksverdhai models)
-                # These models need BitsAndBytesConfig injected explicitly
-                is_hybrid_4bit = "4bit" in model_files_path.lower() or "4bit" in model_folder.lower()
-                is_hybrid_8bit = "8bit" in model_files_path.lower() or "8bit" in model_folder.lower()
                 
                 # Prepare attention implementation kwargs
                 model_kwargs = {
@@ -979,30 +966,6 @@ class BaseVibeVoiceNode:
                     "torch_dtype": torch.bfloat16, # FORCE BFLOAT16
                     "device_map": get_device_map(),
                 }
-
-                # NEW: Inject BitsAndBytesConfig for hybrid quantized models
-                if is_hybrid_4bit or is_hybrid_8bit:
-                    try:
-                        from transformers import BitsAndBytesConfig
-                        logger.info(f"Detected Hybrid Quantized Model: {model_folder}")
-
-                        model_kwargs["quantization_config"] = BitsAndBytesConfig(
-                            load_in_4bit=is_hybrid_4bit,
-                            load_in_8bit=is_hybrid_8bit,
-                            bnb_4bit_compute_dtype=torch.bfloat16,
-                            bnb_4bit_use_double_quant=True,
-                            bnb_4bit_quant_type="nf4",
-                            llm_int8_skip_modules=["acoustic_tokenizer", "semantic_tokenizer", "prediction_head", "acoustic_connector", "semantic_connector", "lm_head"]
-                        )
-                        logger.info("✅ Applied BitsAndBytesConfig with module skipping for hybrid quantization")
-                    except ImportError:
-                        logger.error("❌ bitsandbytes not installed! Required for this model.")
-                        raise Exception("bitsandbytes is required for this quantized model. Please install it in your ComfyUI python environment (pip install bitsandbytes).")
-                
-                # REMOVED QUANTIZATION LOGIC to restore FP16/BF16 precision for LoRAs
-                # Only apply if NOT using the new hybrid models
-                elif quantize_llm != "full precision":
-                    logger.warning("Quantization disabled for VibeVoice to prevent LoRA corruption. Using bfloat16.")
 
                 # Set attention implementation based on user selection
                 use_sage_attention = False
