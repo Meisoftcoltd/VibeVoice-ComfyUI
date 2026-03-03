@@ -162,7 +162,7 @@ class VibeVoiceModel(VibeVoicePreTrainedModel):
 
         self.acoustic_connector = SpeechConnector(config.acoustic_vae_dim, lm_config.hidden_size).to(dtype)
         self.semantic_connector = SpeechConnector(config.semantic_vae_dim, lm_config.hidden_size).to(dtype)
-        
+
         # Register scaling factors as buffers - use 1D tensors for FSDP compatibility
         self.register_buffer('speech_scaling_factor', torch.tensor(float('nan')))  
         self.register_buffer('speech_bias_factor', torch.tensor(float('nan')))

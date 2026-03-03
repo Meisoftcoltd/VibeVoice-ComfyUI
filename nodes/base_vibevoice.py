@@ -185,13 +185,10 @@ def get_available_models() -> List[Tuple[str, str]]:
         # Add default placeholder entries for known models if they are missing (for JIT download)
         # This ensures they appear in the UI list even if not downloaded yet
         models_to_download = [
-            ("VibeVoice-Realtime-0.5B", "microsoft/VibeVoice-Realtime-0.5B"),
             ("VibeVoice-1.5B", "microsoft/VibeVoice-1.5B"),
             ("VibeVoice-Large", "aoi-ot/VibeVoice-Large"),
             ("VibeVoice-Large-Q8", "FabioSarracino/VibeVoice-Large-Q8"),
-            ("VibeVoice-Large-Q4", "DevParker/VibeVoice7b-low-vram"),
-            ("vibevoice-7b-bnb-8bit", "marksverdhai/vibevoice-7b-bnb-8bit"),
-            ("vibevoice-7b-bnb-4bit", "marksverdhai/vibevoice-7b-bnb-4bit")
+            ("VibeVoice-Large-Q4", "DevParker/VibeVoice7b-low-vram")
         ]
 
         existing_model_folders = set(m[0] for m in models)
@@ -840,13 +837,10 @@ class BaseVibeVoiceNode:
         # If we passed a folder name (like VibeVoice-1.5B), map it to repo ID if needed
         # Or if we passed a full repo ID, map to folder name
         repo_map = {
-            "VibeVoice-Realtime-0.5B": "microsoft/VibeVoice-Realtime-0.5B",
             "VibeVoice-1.5B": "microsoft/VibeVoice-1.5B",
             "VibeVoice-Large": "aoi-ot/VibeVoice-Large",
             "VibeVoice-Large-Q8": "FabioSarracino/VibeVoice-Large-Q8",
-            "VibeVoice-Large-Q4": "DevParker/VibeVoice7b-low-vram",
-            "vibevoice-7b-bnb-8bit": "marksverdhai/vibevoice-7b-bnb-8bit",
-            "vibevoice-7b-bnb-4bit": "marksverdhai/vibevoice-7b-bnb-4bit"
+            "VibeVoice-Large-Q4": "DevParker/VibeVoice7b-low-vram"
         }
 
         repo_id = repo_map.get(model_id, model_id) # Default to model_id if not in map (assuming it's a repo id)
@@ -891,6 +885,9 @@ class BaseVibeVoiceNode:
             quantize_llm: LLM quantization mode ("full precision", "8bit", or "4bit")
             lora_path: Optional path to LoRA adapter directory
         """
+        if "0.5B" in model_folder:
+            raise Exception("El modelo 0.5B ya no está soportado en este nodo. Por favor, utiliza los modelos 1.5B o Large.")
+
         # Check if we need to reload model due to attention type, quantization, or LoRA change
         current_attention = getattr(self, 'current_attention_type', None)
         current_quantize_llm = getattr(self, 'current_quantize_llm', 'full precision')
@@ -965,11 +962,6 @@ class BaseVibeVoiceNode:
                 is_quantized_4bit = quantization == "4bit"
                 is_quantized_8bit = quantization == "8bit"
                 is_quantized = is_quantized_4bit or is_quantized_8bit
-
-                # Check for hybrid quantization in model path (marksverdhai models)
-                # These models need BitsAndBytesConfig injected explicitly
-                is_hybrid_4bit = "4bit" in model_files_path.lower() or "4bit" in model_folder.lower()
-                is_hybrid_8bit = "8bit" in model_files_path.lower() or "8bit" in model_folder.lower()
                 
                 # Prepare attention implementation kwargs
                 model_kwargs = {
@@ -978,30 +970,6 @@ class BaseVibeVoiceNode:
                     "torch_dtype": torch.bfloat16, # FORCE BFLOAT16
                     "device_map": get_device_map(),
                 }
-
-                # NEW: Inject BitsAndBytesConfig for hybrid quantized models
-                if is_hybrid_4bit or is_hybrid_8bit:
-                    try:
-                        from transformers import BitsAndBytesConfig
-                        logger.info(f"Detected Hybrid Quantized Model: {model_folder}")
-
-                        model_kwargs["quantization_config"] = BitsAndBytesConfig(
-                            load_in_4bit=is_hybrid_4bit,
-                            load_in_8bit=is_hybrid_8bit,
-                            bnb_4bit_compute_dtype=torch.bfloat16,
-                            bnb_4bit_use_double_quant=True,
-                            bnb_4bit_quant_type="nf4",
-                            llm_int8_skip_modules=["acoustic_tokenizer", "semantic_tokenizer", "prediction_head", "acoustic_connector", "semantic_connector", "lm_head"]
-                        )
-                        logger.info("✅ Applied BitsAndBytesConfig with module skipping for hybrid quantization")
-                    except ImportError:
-                        logger.error("❌ bitsandbytes not installed! Required for this model.")
-                        raise Exception("bitsandbytes is required for this quantized model. Please install it in your ComfyUI python environment (pip install bitsandbytes).")
-                
-                # REMOVED QUANTIZATION LOGIC to restore FP16/BF16 precision for LoRAs
-                # Only apply if NOT using the new hybrid models
-                elif quantize_llm != "full precision":
-                    logger.warning("Quantization disabled for VibeVoice to prevent LoRA corruption. Using bfloat16.")
 
                 # Set attention implementation based on user selection
                 use_sage_attention = False
@@ -1595,7 +1563,7 @@ class BaseVibeVoiceNode:
             stop_check_fn = None
             if INTERRUPTION_SUPPORT:
                 # --- NATIVE PROGRESS BAR HOOK ---
-                # Estimate total tokens for the progress bar (use your existing logic for the tqdm total here)
+                # Estimate total tokens for the progress bar
                 total_steps = estimated_tokens if 'estimated_tokens' in locals() else 358
                 comfy_pbar = comfy.utils.ProgressBar(total_steps)
                 step_counter = [0]
@@ -1622,13 +1590,11 @@ class BaseVibeVoiceNode:
             
             # Generate with official parameters
             with torch.no_grad():
-                # --- DEBUG: Prepare Kwargs and Logits Processor ---
                 generate_kwargs = {
                     "tokenizer": self.processor.tokenizer,
                     "cfg_scale": cfg_scale,
                     "max_new_tokens": None,
-                    "stop_check_fn": stop_check_fn,
-                    #"logits_processor": LogitsProcessorList([FirstStepDebugProcessor()]) # Disabled debug processor
+                    "stop_check_fn": stop_check_fn
                 }
 
                 # FORCE SAMPLING to prevent Greedy Decoding EOS collapse on LoRAs
@@ -1636,8 +1602,6 @@ class BaseVibeVoiceNode:
                 generate_kwargs["do_sample"] = True
                 generate_kwargs["temperature"] = temperature
                 generate_kwargs["top_p"] = top_p
-
-                # print(f"\n[DEBUG] GENERATION KWARGS: {json.dumps({k: str(v) for k,v in generate_kwargs.items() if k != 'tokenizer' and k != 'logits_processor'}, indent=2)}")
 
                 output = self.model.generate(**inputs, **generate_kwargs)
                 
