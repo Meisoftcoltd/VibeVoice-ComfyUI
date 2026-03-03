@@ -45,9 +45,11 @@ Starting from v1.6.0, models and tokenizers must be downloaded manually and plac
 
 ### Download Links
 | Model                 | Size    | Download Link |
-|------------------------|---------|--------------------|
-| **VibeVoice-1.5B**     | ~5.4GB  | [microsoft/VibeVoice-1.5B](https://huggingface.co/microsoft/VibeVoice-1.5B) |
-| **VibeVoice-Large**    | ~18.7GB | [aoi-ot/VibeVoice-Large](https://huggingface.co/aoi-ot/VibeVoice-Large) |
+|-----------------------|---------|--------------------|
+| **VibeVoice-1.5B**    | ~5.4GB  | [microsoft/VibeVoice-1.5B](https://huggingface.co/microsoft/VibeVoice-1.5B) |
+| **VibeVoice-Large**   | ~18.7GB | [aoi-ot/VibeVoice-Large](https://huggingface.co/aoi-ot/VibeVoice-Large) |
+| **VibeVoice-Large-Q8**| ~11.6GB | [FabioSarracino/VibeVoice-Large-Q8](https://huggingface.co/FabioSarracino/VibeVoice-Large-Q8) |
+| **VibeVoice-Large-Q4**| ~6.6GB  | [DevParker/VibeVoice7b-low-vram](https://huggingface.co/DevParker/VibeVoice7b-low-vram) |
 
 ### Tokenizer Requirement
 VibeVoice explicitly requires the Qwen2.5-1.5B tokenizer.
@@ -94,14 +96,15 @@ Advanced TTS for dialogue.
 Automatically processes raw audio into a valid training dataset.
 - **Inputs:** A directory containing raw audio files (`.wav`, `.mp3`, etc.).
 - **Functionality:** Utilizes the Whisper model to transcribe the audio, normalizes the tracks to 24kHz Mono, and applies "Smart Slicing" to clip tracks into optimal 20-second segments while preserving natural pauses.
+- **Smart Caching:** If a compiled `prompts.jsonl` dataset already exists in the target output folder, the node will intelligently skip the heavy transcription phase and instantly pass the directory to the next node.
 - **Output:** An absolute directory path containing a ready-to-train `prompts.jsonl`.
 
 ### 4. 🚀 VibeVoice LoRA Trainer
 An isolated, advanced QLoRA training pipeline.
 - **Advanced Architecture:**
   - **OOM Protector:** If memory fails, automatically halves batch size, scales gradient accumulation, and resumes from the last checkpoint.
-  - **Smart Saver:** Monitors dual losses (Acoustic + Text) to calculate a "True Mean". Discards underperforming checkpoints dynamically while keeping the absolute best models.
-  - **Auto-Resume:** Scans the target output directory and seamlessly continues training if the process was interrupted.
+  - **Smart Saver:** Monitors dual losses (Acoustic + Text) to calculate a "True Mean". Discards underperforming older checkpoints dynamically while strictly preserving the most recent checkpoint state and the absolute best Top N models.
+  - **Auto-Resume:** Automatically detects existing checkpoints in the output directory. It passes the exact path of the latest valid checkpoint string directly into Hugging Face Trainer, ensuring zero progress is lost if the UI resets or the OOM protector kicks in.
 - **⭐ Official Training Recommendations:**
   - **Learning Rate:** Recommended to set strictly to `2e-6` to avoid catastrophic forgetting and NaN generation.
   - **Early Stopping Patience:**

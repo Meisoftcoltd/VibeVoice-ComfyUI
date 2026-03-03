@@ -48,6 +48,8 @@ A partir de la v1.6.0, los modelos y el tokenizador deben descargarse manualment
 |------------------------|---------|--------------------|
 | **VibeVoice-1.5B**     | ~5.4GB  | [microsoft/VibeVoice-1.5B](https://huggingface.co/microsoft/VibeVoice-1.5B) |
 | **VibeVoice-Large**    | ~18.7GB | [aoi-ot/VibeVoice-Large](https://huggingface.co/aoi-ot/VibeVoice-Large) |
+| **VibeVoice-Large-Q8** | ~11.6GB | [FabioSarracino/VibeVoice-Large-Q8](https://huggingface.co/FabioSarracino/VibeVoice-Large-Q8) |
+| **VibeVoice-Large-Q4** | ~6.6GB  | [DevParker/VibeVoice7b-low-vram](https://huggingface.co/DevParker/VibeVoice7b-low-vram) |
 
 ### Requisito del Tokenizador
 VibeVoice requiere explícitamente el tokenizador Qwen2.5-1.5B.
@@ -94,13 +96,15 @@ TTS avanzado para diálogo.
 Procesa automáticamente audio en bruto en un conjunto de datos válido para entrenamiento.
 - **Entradas:** Un directorio que contenga archivos de audio en bruto (`.wav`, `.mp3`, etc.).
 - **Funcionalidad:** Utiliza el modelo Whisper para transcribir el audio, normaliza las pistas a 24kHz Mono y aplica "Corte Inteligente" (Smart Slicing) para recortar pistas en segmentos óptimos de 20 segundos preservando las pausas naturales de respiración.
+- **Smart Caching (Caché Inteligente):** Si el nodo detecta que ya existe un dataset compilado (`prompts.jsonl`) en la carpeta de salida, omitirá instantáneamente el pesado proceso de transcripción con Whisper y pasará el directorio de salida directamente al siguiente nodo para ahorrar tiempo.
 - **Salida:** Una ruta absoluta al directorio que contiene el archivo `prompts.jsonl` listo para entrenar.
 
 ### 4. 🚀 VibeVoice LoRA Trainer
 Un pipeline de entrenamiento QLoRA avanzado y aislado.
 - **Arquitectura Avanzada:**
   - **Protector OOM:** Si la memoria falla, corta automáticamente el `batch_size` a la mitad, escala los pasos de acumulación de gradiente y reanuda desde el último checkpoint (Auto-Resume).
-  - **Smart Saver:** Monitorea ambas pérdidas (Acústica + Texto) para calcular una "Media Real". Descarta dinámicamente los checkpoints con bajo rendimiento mientras conserva intactos los mejores modelos absolutos.
+  - **Smart Saver:** Monitorea ambas pérdidas (Acústica + Texto) para calcular una "Media Real". Descarta dinámicamente los checkpoints viejos con bajo rendimiento mientras **preserva estrictamente intacto** el estado del último checkpoint generado y el Top N de los mejores modelos.
+  - **Auto-Resume:** Detecta automáticamente los checkpoints existentes en el directorio de salida. Pasa la ruta exacta en formato string del último checkpoint válido directamente al Hugging Face Trainer, asegurando que no se pierda nada de progreso si la interfaz crashea o el Protector OOM se activa.
 - **⭐ Recomendaciones Oficiales de Entrenamiento:**
   - **Learning Rate (Tasa de Aprendizaje):** Se recomienda configurarlo estrictamente en `2e-6` para evitar el olvido catastrófico (catastrophic forgetting) y la generación de ruidos NaN.
   - **Early Stopping Patience (Paciencia de Parada Temprana):**
