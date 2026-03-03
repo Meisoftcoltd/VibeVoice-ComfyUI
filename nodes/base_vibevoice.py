@@ -186,7 +186,9 @@ def get_available_models() -> List[Tuple[str, str]]:
         # This ensures they appear in the UI list even if not downloaded yet
         models_to_download = [
             ("VibeVoice-1.5B", "microsoft/VibeVoice-1.5B"),
-            ("VibeVoice-Large", "aoi-ot/VibeVoice-Large")
+            ("VibeVoice-Large", "aoi-ot/VibeVoice-Large"),
+            ("VibeVoice-Large-Q8", "FabioSarracino/VibeVoice-Large-Q8"),
+            ("VibeVoice-Large-Q4", "DevParker/VibeVoice7b-low-vram")
         ]
 
         existing_model_folders = set(m[0] for m in models)
@@ -836,7 +838,9 @@ class BaseVibeVoiceNode:
         # Or if we passed a full repo ID, map to folder name
         repo_map = {
             "VibeVoice-1.5B": "microsoft/VibeVoice-1.5B",
-            "VibeVoice-Large": "aoi-ot/VibeVoice-Large"
+            "VibeVoice-Large": "aoi-ot/VibeVoice-Large",
+            "VibeVoice-Large-Q8": "FabioSarracino/VibeVoice-Large-Q8",
+            "VibeVoice-Large-Q4": "DevParker/VibeVoice7b-low-vram"
         }
 
         repo_id = repo_map.get(model_id, model_id) # Default to model_id if not in map (assuming it's a repo id)

@@ -109,9 +109,16 @@ class VibeVoice_Dataset_Preparator:
         from transformers import WhisperProcessor, WhisperForConditionalGeneration
 
         os.makedirs(output_dataset_dir, exist_ok=True)
+        prompts_path = os.path.join(output_dataset_dir, "prompts.jsonl")
+
+        # OMITIR CREACIÓN SI YA EXISTE EL DATASET
+        if os.path.exists(prompts_path):
+            print(f"\n[VibeVoice Dataset Preparator] ⏭️ El archivo prompts.jsonl ya existe en {output_dataset_dir}.")
+            print(f"[VibeVoice Dataset Preparator] Omitiendo la transcripción y procesamiento de audio para pasar directamente al entrenamiento.\n")
+            return (os.path.abspath(output_dataset_dir),)
+
         wavs_dir = os.path.join(output_dataset_dir, "wavs")
         os.makedirs(wavs_dir, exist_ok=True)
-        prompts_path = os.path.join(output_dataset_dir, "prompts.jsonl")
 
         # Configuraciones acústicas
         TARGET_SR = 24000
@@ -264,7 +271,8 @@ class VibeVoice_LoRA_Trainer:
         base_models = [
             "microsoft/VibeVoice-1.5B",
             "aoi-ot/VibeVoice-Large",
-            "microsoft/VibeVoice-7B",
+            "FabioSarracino/VibeVoice-Large-Q8",
+            "DevParker/VibeVoice7b-low-vram",
             "custom_local_path"
         ]
         return {
@@ -316,7 +324,9 @@ class VibeVoice_LoRA_Trainer:
         # Or if we passed a full repo ID, map to folder name
         repo_map = {
             "VibeVoice-1.5B": "microsoft/VibeVoice-1.5B",
-            "VibeVoice-Large": "aoi-ot/VibeVoice-Large"
+            "VibeVoice-Large": "aoi-ot/VibeVoice-Large",
+            "VibeVoice-Large-Q8": "FabioSarracino/VibeVoice-Large-Q8",
+            "VibeVoice-Large-Q4": "DevParker/VibeVoice7b-low-vram"
         }
 
         repo_id = repo_map.get(model_id, model_id) # Default to model_id if not in map (assuming it's a repo id)
